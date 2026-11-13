@@ -1,14 +1,14 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import test from "node:test";
 import {
   ANTHROPIC_MESSAGES_API,
+  builtinTools,
   MISSING_RESULT_TEXT,
+  normalizeHistory,
   ProviderRegistry,
+  replaysNatively,
   ScriptedProvider,
   Session,
-  builtinTools,
-  normalizeHistory,
-  replaysNatively,
   toAnthropicMessages,
   toOpenAIMessages,
 } from "../dist/index.js";
@@ -21,7 +21,7 @@ const toolTurn = (id) => [asst(call(id)), { role: "user", content: [result(id)] 
 const target = { provider: "anthropic", model: "m1", api: ANTHROPIC_MESSAGES_API };
 
 test("foreign tool-call ids are made portable and their results follow", () => {
-  const longId = "call|" + "x".repeat(100);
+  const longId = `call|${"x".repeat(100)}`;
   const out = normalizeHistory([user("hi"), ...toolTurn(longId)], target);
   const id = out[1].content[0].id;
   assert.match(id, /^[a-zA-Z0-9_-]{1,64}$/);
@@ -59,7 +59,11 @@ test("natively replayed messages keep their ids; other models get sanitized ones
   assert.equal(same[1].content[0].id, "weird id|1");
   assert.equal(same[2].content[0].callId, "weird id|1");
 
-  for (const other of [{ ...target, model: "m2" }, { ...target, api: "something-else" }, { ...target, provider: "openai" }]) {
+  for (const other of [
+    { ...target, model: "m2" },
+    { ...target, api: "something-else" },
+    { ...target, provider: "openai" },
+  ]) {
     assert.equal(replaysNatively(msg, other), false);
     const out = normalizeHistory(history, other);
     assert.equal(out[1].content[0].id, "weird_id_1");
@@ -71,11 +75,17 @@ test("a call without a result gets an error result placed before the next user t
   const out = normalizeHistory([user("go"), asst(call("c1"), call("c2")), user("next")], target);
   assert.equal(out.length, 3);
   const parts = out[2].content;
-  assert.deepEqual(parts.map((p) => p.type), ["tool_result", "tool_result", "text"]);
-  assert.deepEqual(parts.slice(0, 2).map((p) => [p.callId, p.content, p.isError]), [
-    ["c1", MISSING_RESULT_TEXT, true],
-    ["c2", MISSING_RESULT_TEXT, true],
-  ]);
+  assert.deepEqual(
+    parts.map((p) => p.type),
+    ["tool_result", "tool_result", "text"],
+  );
+  assert.deepEqual(
+    parts.slice(0, 2).map((p) => [p.callId, p.content, p.isError]),
+    [
+      ["c1", MISSING_RESULT_TEXT, true],
+      ["c2", MISSING_RESULT_TEXT, true],
+    ],
+  );
 });
 
 test("real results are kept and ordered by call order; only missing ones are filled", () => {
@@ -100,18 +110,29 @@ test("unanswered calls at the end of history get a closing user message", () => 
 
 test("two assistant messages in a row get results inserted between them", () => {
   const out = normalizeHistory([user("go"), asst(call("c1")), asst({ type: "text", text: "hm" })], target);
-  assert.deepEqual(out.map((m) => m.role), ["user", "assistant", "user", "assistant"]);
+  assert.deepEqual(
+    out.map((m) => m.role),
+    ["user", "assistant", "user", "assistant"],
+  );
   assert.equal(out[2].content[0].callId, "c1");
 });
 
 test("results that answer no call are dropped", () => {
   const out = normalizeHistory([user("hi"), { role: "user", content: [result("ghost")] }, user("again")], target);
-  assert.deepEqual(out.map((m) => m.content[0].text), ["hi", "again"]);
+  assert.deepEqual(
+    out.map((m) => m.content[0].text),
+    ["hi", "again"],
+  );
 });
 
 test("empty and whitespace-only text is dropped, and emptied messages disappear", () => {
   const out = normalizeHistory(
-    [user("hi"), asst({ type: "text", text: "" }), asst({ type: "text", text: "  \n" }, { type: "text", text: "ok" }), user("  ")],
+    [
+      user("hi"),
+      asst({ type: "text", text: "" }),
+      asst({ type: "text", text: "  \n" }, { type: "text", text: "ok" }),
+      user("  "),
+    ],
     target,
   );
   assert.equal(out.length, 2);
@@ -119,8 +140,14 @@ test("empty and whitespace-only text is dropped, and emptied messages disappear"
 });
 
 test("null or missing content from hand-built histories is tolerated", () => {
-  const out = normalizeHistory([user("hi"), { role: "assistant", content: null }, { role: "user" }, user("yo")], target);
-  assert.deepEqual(out.map((m) => m.content[0].text), ["hi", "yo"]);
+  const out = normalizeHistory(
+    [user("hi"), { role: "assistant", content: null }, { role: "user" }, user("yo")],
+    target,
+  );
+  assert.deepEqual(
+    out.map((m) => m.content[0].text),
+    ["hi", "yo"],
+  );
 });
 
 test("the input history is not mutated", () => {
@@ -147,7 +174,11 @@ test("anthropic adapter replays the native payload only for the same provider, m
   const payload = [{ type: "text", text: "NATIVE" }];
   const history = [
     user("hi"),
-    { role: "assistant", content: [{ type: "text", text: "neutral" }], native: { provider: "anthropic", model: "m1", api: ANTHROPIC_MESSAGES_API, payload } },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "neutral" }],
+      native: { provider: "anthropic", model: "m1", api: ANTHROPIC_MESSAGES_API, payload },
+    },
     user("again"),
   ];
   assert.deepEqual(toAnthropicMessages(history, "m1")[1].content, payload);
@@ -167,6 +198,9 @@ test("openai adapter shortens over-long foreign ids to 40 characters consistentl
 
 test("openai adapter fills missing tool results so the request stays valid", () => {
   const out = toOpenAIMessages("sys", [user("go"), asst(call("c1")), user("next")], "gpt-x");
-  assert.deepEqual(out.map((m) => m.role), ["system", "user", "assistant", "tool", "user"]);
+  assert.deepEqual(
+    out.map((m) => m.role),
+    ["system", "user", "assistant", "tool", "user"],
+  );
   assert.equal(out[3].tool_call_id, "c1");
 });

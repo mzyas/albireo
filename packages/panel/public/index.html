@@ -54,12 +54,13 @@
   <span class="spacer"></span>
   <select id="provider" aria-label="Provider"></select>
   <input id="model" placeholder="model (default)" size="18" aria-label="Model">
-  <button id="switch">Switch</button>
-  <button id="abort" disabled>Stop</button>
+  <button id="switch" type="button">Switch</button>
+  <button id="abort" type="button" disabled>Stop</button>
 </header>
 <main id="log"></main>
 <footer>
-  <form id="form"><input id="text" placeholder="Message Albireo…" autocomplete="off" autofocus><button class="primary">Send</button></form>
+  <!-- biome-ignore lint/a11y/noAutofocus: the message box is the panel's only primary input -->
+  <form id="form"><input id="text" placeholder="Message Albireo…" autocomplete="off" autofocus><button type="submit" class="primary">Send</button></form>
 </footer>
 <script type="module">
 const token = new URLSearchParams(location.search).get("token") ?? "";
@@ -71,7 +72,7 @@ const approvals = new Map();
 
 function add(cls, text) {
   const el = document.createElement("div");
-  el.className = "msg " + cls;
+  el.className = `msg ${cls}`;
   el.textContent = text ?? "";
   log.appendChild(el);
   scroll();
@@ -100,13 +101,13 @@ function setStatus(state) {
   $("switch").disabled = running;
 }
 
-function setWhere(provider, model) { $("where").textContent = provider + " · " + model; }
+function setWhere(provider, model) { $("where").textContent = `${provider} · ${model}`; }
 
 function approvalCard(ev) {
   const el = document.createElement("div");
   el.className = "msg approval";
   el.innerHTML = "<strong></strong><code></code><div class='row'><button class='primary'>Allow</button><button>Deny</button></div>";
-  el.querySelector("strong").textContent = "Allow " + ev.name + " (" + ev.risk + ")?";
+  el.querySelector("strong").textContent = `Allow ${ev.name} (${ev.risk})?`;
   el.querySelector("code").textContent = json(ev.input);
   const [allow, deny] = el.querySelectorAll("button");
   allow.onclick = () => command({ type: "approve", id: ev.id, allow: true });
@@ -119,7 +120,7 @@ function approvalCard(ev) {
 function toolCard(ev) {
   const el = document.createElement("div");
   el.className = "msg tool";
-  el.id = "call-" + ev.id;
+  el.id = `call-${ev.id}`;
   el.innerHTML = "<span class='name'></span> <span class='args'></span>";
   el.querySelector(".name").textContent = ev.name;
   el.querySelector(".args").textContent = JSON.stringify(ev.input);
@@ -150,14 +151,14 @@ function handle(ev) {
     case "approval_request": approvalCard(ev); break;
     case "approval_resolved": approvals.get(ev.id)?.remove(); approvals.delete(ev.id); break;
     case "tool_result": {
-      const card = $("call-" + ev.id);
+      const card = $(`call-${ev.id}`);
       if (!card) break;
       if (ev.isError) card.classList.add("err");
       const pre = document.createElement("pre"); pre.textContent = ev.content;
       card.appendChild(pre); scroll();
       break;
     }
-    case "provider_changed": setWhere(ev.provider, ev.model); $("provider").value = ev.provider; add("notice", "Switched to " + ev.provider + " · " + ev.model); break;
+    case "provider_changed": setWhere(ev.provider, ev.model); $("provider").value = ev.provider; add("notice", `Switched to ${ev.provider} · ${ev.model}`); break;
     case "status": setStatus(ev.state); break;
     case "notice": add("notice", ev.text); break;
     case "error": add("error", ev.message); break;
@@ -169,7 +170,7 @@ async function command(body) {
   if (!res.ok) add("error", (await res.json().catch(() => ({}))).error ?? "request failed");
 }
 
-const es = new EventSource("/events?token=" + encodeURIComponent(token));
+const es = new EventSource(`/events?token=${encodeURIComponent(token)}`);
 es.onmessage = (e) => handle(JSON.parse(e.data));
 es.onerror = () => { $("status").textContent = "disconnected"; $("status").classList.remove("running"); };
 

@@ -8,12 +8,16 @@
     "build": "tsc -b",
     "dev": "tsc -b -w",
     "test": "pnpm -r --if-present test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
     "start": "node packages/cli/dist/cli.js"
   },
   "engines": {
     "node": ">=22"
   },
+  "packageManager": "pnpm@12.18.0",
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }

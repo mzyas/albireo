@@ -46,9 +46,7 @@ export interface ToolSpec {
   inputSchema: Record<string, unknown>;
 }
 
-export type StreamEvent =
-  | { type: "text_delta"; text: string }
-  | { type: "reasoning_delta"; text: string };
+export type StreamEvent = { type: "text_delta"; text: string } | { type: "reasoning_delta"; text: string };
 
 export interface TurnRequest {
   model: string;

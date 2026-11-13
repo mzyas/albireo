@@ -1,9 +1,9 @@
 import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { z } from "zod";
-import { defineTool, type AnyTool } from "../tool.js";
+import { type AnyTool, defineTool } from "../tool.js";
 
 const execAsync = promisify(exec);
 
@@ -12,7 +12,7 @@ export function resolveInside(cwd: string, p: string): string {
   const root = path.resolve(cwd);
   const target = path.resolve(root, p);
   const rel = path.relative(root, target);
-  if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new Error(`path escapes the workspace: ${p}`);
   }
   return target;
@@ -27,7 +27,7 @@ const readFileTool = defineTool({
   input: z.object({ path: z.string().describe("Path relative to the workspace root") }),
   async run({ path: p }, { cwd }) {
     const text = await readFile(resolveInside(cwd, p), "utf8");
-    return text.length > MAX_READ ? text.slice(0, MAX_READ) + "\n…[truncated]" : text;
+    return text.length > MAX_READ ? `${text.slice(0, MAX_READ)}\n…[truncated]` : text;
   },
 });
 
@@ -38,7 +38,7 @@ const listDirTool = defineTool({
   input: z.object({ path: z.string().default(".").describe("Directory relative to the workspace root") }),
   async run({ path: p }, { cwd }) {
     const entries = await readdir(resolveInside(cwd, p), { withFileTypes: true });
-    return entries.map((e) => (e.isDirectory() ? e.name + "/" : e.name)).join("\n") || "(empty)";
+    return entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).join("\n") || "(empty)";
   },
 });
 
@@ -83,7 +83,7 @@ const runCommandTool = defineTool({
 });
 
 function clip(s: string): string {
-  return s.length > MAX_OUT ? s.slice(0, MAX_OUT) + "\n…[truncated]" : s;
+  return s.length > MAX_OUT ? `${s.slice(0, MAX_OUT)}\n…[truncated]` : s;
 }
 
 export const builtinTools: AnyTool[] = [readFileTool, listDirTool, writeFileTool, runCommandTool];
