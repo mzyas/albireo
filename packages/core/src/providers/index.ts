@@ -2,8 +2,8 @@ import type { Provider } from "../types.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAIProvider } from "./openai.js";
 
-export { AnthropicProvider, toAnthropicMessages } from "./anthropic.js";
-export { OpenAIProvider, toOpenAIMessages } from "./openai.js";
+export { AnthropicProvider, toAnthropicMessages, ANTHROPIC_MESSAGES_API } from "./anthropic.js";
+export { OpenAIProvider, toOpenAIMessages, OPENAI_CHAT_API } from "./openai.js";
 export { ScriptedProvider, type ScriptStep } from "./scripted.js";
 
 /** Lazily constructs providers so a missing key for one vendor doesn't block the other. */

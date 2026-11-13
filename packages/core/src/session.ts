@@ -172,9 +172,13 @@ export class Session {
           this.emit({ type: "notice", text: "The model refused this request." });
           break;
         }
-        this.history.push(res.message);
+        const message: Message = {
+          ...res.message,
+          meta: { provider: provider.id, model, stopReason: res.stopReason, usage: res.usage, at: Date.now() },
+        };
+        this.history.push(message);
 
-        const calls = res.message.content.filter(
+        const calls = message.content.filter(
           (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
         );
         if (calls.length === 0) {

@@ -9,8 +9,14 @@ import type {
   TurnResult,
 } from "../types.js";
 
+import { normalizeHistory, replaysNatively, type HistoryTarget } from "../history.js";
+
 type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
+
+/** Wire API tag stored on native payloads so they only replay against the same API. */
+export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
+const MAX_TOOL_ID = 64;
 
 export interface AnthropicOptions {
   apiKey?: string;
@@ -79,7 +85,7 @@ export class AnthropicProvider implements Provider {
         role: "assistant",
         content,
         // Thinking blocks must be replayed unchanged on the same model.
-        native: { provider: this.id, model: req.model, payload: final.content },
+        native: { provider: this.id, model: req.model, api: ANTHROPIC_MESSAGES_API, payload: final.content },
       },
       stopReason: mapStop(final.stop_reason),
       usage: {
@@ -107,8 +113,9 @@ function mapStop(reason: string | null | undefined): StopReason {
 }
 
 export function toAnthropicMessages(messages: Message[], model: string): BetaMessageParam[] {
-  return messages.map((m): BetaMessageParam => {
-    if (m.role === "assistant" && m.native?.provider === "anthropic" && m.native.model === model) {
+  const target: HistoryTarget = { provider: "anthropic", model, api: ANTHROPIC_MESSAGES_API };
+  return normalizeHistory(messages, target, { maxIdLength: MAX_TOOL_ID }).map((m): BetaMessageParam => {
+    if (m.native && replaysNatively(m, target)) {
       return { role: "assistant", content: m.native.payload as BetaContentBlockParam[] };
     }
     const content: BetaContentBlockParam[] = [];

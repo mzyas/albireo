@@ -9,7 +9,13 @@ import type {
   ContentPart,
 } from "../types.js";
 
+import { normalizeHistory } from "../history.js";
+
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+
+export const OPENAI_CHAT_API = "openai-chat";
+/** Chat Completions rejects tool_call ids longer than 40 characters. */
+const MAX_TOOL_ID = 40;
 
 export interface OpenAIOptions {
   apiKey?: string;
@@ -32,7 +38,7 @@ export class OpenAIProvider implements Provider {
     const stream = await this.client.chat.completions.create(
       {
         model: req.model,
-        messages: toOpenAIMessages(req.system, req.messages),
+        messages: toOpenAIMessages(req.system, req.messages, req.model),
         tools: req.tools.map((t) => ({
           type: "function" as const,
           function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -116,9 +122,10 @@ function mapFinish(reason: string | null): StopReason {
   }
 }
 
-export function toOpenAIMessages(system: string, messages: Message[]): ChatMessage[] {
+export function toOpenAIMessages(system: string, messages: Message[], model = ""): ChatMessage[] {
   const out: ChatMessage[] = [{ role: "system", content: system }];
-  for (const m of messages) {
+  const history = normalizeHistory(messages, { provider: "openai", model, api: OPENAI_CHAT_API }, { maxIdLength: MAX_TOOL_ID });
+  for (const m of history) {
     if (m.role === "assistant") {
       const text = m.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("");
       const toolCalls = m.content.flatMap((p) =>

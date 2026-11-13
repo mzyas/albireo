@@ -14,10 +14,12 @@ export interface Message {
   /**
    * Provider-native replay payload (e.g. Anthropic content blocks including
    * thinking blocks, which must be passed back unchanged). Only valid for the
-   * same provider AND model that produced it; adapters ignore it otherwise and
-   * rebuild from `content`.
+   * same provider, model AND wire API that produced it; adapters ignore it
+   * otherwise and rebuild from `content`.
    */
-  native?: { provider: string; model: string; payload: unknown };
+  native?: { provider: string; model: string; api?: string; payload: unknown };
+  /** Who produced an assistant message and how it ended. Set by the session. */
+  meta?: MessageMeta;
 }
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";
@@ -26,6 +28,15 @@ export interface Usage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
+}
+
+export interface MessageMeta {
+  provider: string;
+  model: string;
+  stopReason: StopReason;
+  usage: Usage;
+  /** Epoch milliseconds when the turn finished. */
+  at: number;
 }
 
 export interface ToolSpec {
