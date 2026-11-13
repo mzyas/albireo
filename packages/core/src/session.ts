@@ -111,22 +111,12 @@ export class Session {
     };
   }
 
-  notice(text: string): void {
-    this.emit({ type: "notice", text });
-  }
-
   /** Switch vendor/model between turns; the neutral history carries over. */
   switchProvider(id: string, model?: string): void {
     if (this.running) throw new Error("Cannot switch provider while a turn is running");
     this.provider = this.registry.get(id);
     this._model = model ?? this.provider.defaultModel;
     this.emit({ type: "provider_changed", provider: this.providerId, model: this._model });
-  }
-
-  setModel(model: string): void {
-    if (this.running) throw new Error("Cannot change model while a turn is running");
-    this._model = model;
-    this.emit({ type: "provider_changed", provider: this.providerId, model });
   }
 
   approve(id: string, allow: boolean): void {

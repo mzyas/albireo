@@ -13,7 +13,6 @@ export interface PanelServerOptions {
 
 export interface PanelServer {
   url: string;
-  token: string;
   close(): Promise<void>;
 }
 
@@ -133,7 +132,6 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
 
   return {
     url: `http://127.0.0.1:${port}/?token=${token}`,
-    token,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

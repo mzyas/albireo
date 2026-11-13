@@ -7,13 +7,13 @@
 <style>
   :root {
     --bg: #fafaf9; --panel: #ffffff; --text: #1c1917; --muted: #78716c; --line: #e7e5e4;
-    --accent: #2563eb; --user: #eff6ff; --warn: #b45309; --warn-bg: #fffbeb; --err: #b91c1c; --ok: #15803d;
+    --accent: #2563eb; --user: #eff6ff; --warn: #b45309; --warn-bg: #fffbeb; --err: #b91c1c;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #141413; --panel: #1c1b1a; --text: #e7e5e4; --muted: #a8a29e; --line: #2e2c2a;
-      --accent: #60a5fa; --user: #1e2a3d; --warn: #fbbf24; --warn-bg: #2a2314; --err: #f87171; --ok: #4ade80;
+      --accent: #60a5fa; --user: #1e2a3d; --warn: #fbbf24; --warn-bg: #2a2314; --err: #f87171;
     }
   }
   * { box-sizing: border-box; }
@@ -59,7 +59,7 @@
 </header>
 <main id="log"></main>
 <footer>
-  <form id="form"><input id="text" placeholder="Message Albireo…" autocomplete="off" autofocus><button class="primary" id="send">Send</button></form>
+  <form id="form"><input id="text" placeholder="Message Albireo…" autocomplete="off" autofocus><button class="primary">Send</button></form>
 </footer>
 <script type="module">
 const token = new URLSearchParams(location.search).get("token") ?? "";

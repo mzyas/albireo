@@ -20,7 +20,7 @@ export function resolveInside(cwd: string, p: string): string {
 
 const MAX_READ = 200_000;
 
-export const readFileTool = defineTool({
+const readFileTool = defineTool({
   name: "read_file",
   description: "Read a UTF-8 text file inside the workspace.",
   risk: "read",
@@ -31,7 +31,7 @@ export const readFileTool = defineTool({
   },
 });
 
-export const listDirTool = defineTool({
+const listDirTool = defineTool({
   name: "list_dir",
   description: "List entries of a directory inside the workspace. Directories end with '/'.",
   risk: "read",
@@ -42,7 +42,7 @@ export const listDirTool = defineTool({
   },
 });
 
-export const writeFileTool = defineTool({
+const writeFileTool = defineTool({
   name: "write_file",
   description: "Create or overwrite a UTF-8 text file inside the workspace.",
   risk: "write",
@@ -60,7 +60,7 @@ export const writeFileTool = defineTool({
 
 const MAX_OUT = 30_000;
 
-export const runCommandTool = defineTool({
+const runCommandTool = defineTool({
   name: "run_command",
   description: "Run a shell command in the workspace root (60s timeout). Returns stdout, stderr and the exit code.",
   risk: "exec",
