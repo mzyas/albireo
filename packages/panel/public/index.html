@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Albireo Panel</title>
+<style>
+  :root {
+    --bg: #fafaf9; --panel: #ffffff; --text: #1c1917; --muted: #78716c; --line: #e7e5e4;
+    --accent: #2563eb; --user: #eff6ff; --warn: #b45309; --warn-bg: #fffbeb; --err: #b91c1c; --ok: #15803d;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1c1b1a; --text: #e7e5e4; --muted: #a8a29e; --line: #2e2c2a;
+      --accent: #60a5fa; --user: #1e2a3d; --warn: #fbbf24; --warn-bg: #2a2314; --err: #f87171; --ok: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.running { color: var(--accent); border-color: var(--accent); }
+  .spacer { flex: 1; }
+  select, input, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  main { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 760px; width: 100%; margin: 0 auto; white-space: pre-wrap; word-break: break-word; }
+  .user { background: var(--user); padding: 8px 12px; border-radius: 8px; }
+  .reasoning { color: var(--muted); font-size: 13px; font-style: italic; }
+  .tool { font-family: var(--mono); font-size: 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 6px 10px; }
+  .tool .name { color: var(--accent); }
+  .tool pre { margin: 6px 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
+  .tool.err .name { color: var(--err); }
+  .notice { color: var(--muted); font-size: 13px; text-align: center; }
+  .error { color: var(--err); }
+  .approval { border: 1px solid var(--warn); background: var(--warn-bg); border-radius: 8px; padding: 10px 12px; }
+  .approval code { display: block; font-family: var(--mono); font-size: 13px; margin: 6px 0; white-space: pre-wrap; }
+  .approval .row { display: flex; gap: 8px; }
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 16px; }
+  footer form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  footer input { flex: 1; }
+  @media (max-width: 520px) { header .spacer { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Albireo</h1>
+  <span class="pill" id="status">connecting…</span>
+  <span class="pill" id="where"></span>
+  <span class="spacer"></span>
+  <select id="provider" aria-label="Provider"></select>
+  <input id="model" placeholder="model (default)" size="18" aria-label="Model">
+  <button id="switch">Switch</button>
+  <button id="abort" disabled>Stop</button>
+</header>
+<main id="log"></main>
+<footer>
+  <form id="form"><input id="text" placeholder="Message Albireo…" autocomplete="off" autofocus><button class="primary" id="send">Send</button></form>
+</footer>
+<script type="module">
+const token = new URLSearchParams(location.search).get("token") ?? "";
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let live = null;        // {el, reasoningEl, textEl}
+let running = false;
+const approvals = new Map();
+
+function add(cls, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.textContent = text ?? "";
+  log.appendChild(el);
+  scroll();
+  return el;
+}
+function scroll() { log.scrollTop = log.scrollHeight; }
+function json(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
+
+function ensureLive() {
+  if (live) return live;
+  const el = document.createElement("div");
+  el.className = "msg";
+  const reasoningEl = document.createElement("div"); reasoningEl.className = "reasoning";
+  const textEl = document.createElement("div");
+  el.append(reasoningEl, textEl);
+  log.appendChild(el);
+  live = { el, reasoningEl, textEl };
+  return live;
+}
+
+function setStatus(state) {
+  running = state === "running";
+  $("status").textContent = state;
+  $("status").classList.toggle("running", running);
+  $("abort").disabled = !running;
+  $("switch").disabled = running;
+}
+
+function setWhere(provider, model) { $("where").textContent = provider + " · " + model; }
+
+function approvalCard(ev) {
+  const el = document.createElement("div");
+  el.className = "msg approval";
+  el.innerHTML = "<strong></strong><code></code><div class='row'><button class='primary'>Allow</button><button>Deny</button></div>";
+  el.querySelector("strong").textContent = "Allow " + ev.name + " (" + ev.risk + ")?";
+  el.querySelector("code").textContent = json(ev.input);
+  const [allow, deny] = el.querySelectorAll("button");
+  allow.onclick = () => command({ type: "approve", id: ev.id, allow: true });
+  deny.onclick = () => command({ type: "approve", id: ev.id, allow: false });
+  approvals.set(ev.id, el);
+  log.appendChild(el);
+  scroll();
+}
+
+function toolCard(ev) {
+  const el = document.createElement("div");
+  el.className = "msg tool";
+  el.id = "call-" + ev.id;
+  el.innerHTML = "<span class='name'></span> <span class='args'></span>";
+  el.querySelector(".name").textContent = ev.name;
+  el.querySelector(".args").textContent = JSON.stringify(ev.input);
+  log.appendChild(el);
+  scroll();
+}
+
+function handle(ev) {
+  switch (ev.type) {
+    case "snapshot":
+      log.replaceChildren(); live = null; approvals.clear();
+      for (const e of ev.log) handle(e);
+      if (ev.live) { const l = ensureLive(); l.reasoningEl.textContent = ev.live.reasoning; l.textEl.textContent = ev.live.text; }
+      for (const p of ev.pending) approvalCard(p);
+      setStatus(ev.status); setWhere(ev.provider, ev.model);
+      $("provider").replaceChildren(...ev.providers.map((p) => new Option(p, p, false, p === ev.provider)));
+      break;
+    case "user": add("user", ev.text); break;
+    case "text_delta": ensureLive().textEl.textContent += ev.text; scroll(); break;
+    case "reasoning_delta": ensureLive().reasoningEl.textContent += ev.text; scroll(); break;
+    case "assistant_end": {
+      if (!live && ev.text) { const l = ensureLive(); l.textEl.textContent = ev.text; }
+      if (live && !live.textEl.textContent && !live.reasoningEl.textContent) live.el.remove();
+      live = null;
+      break;
+    }
+    case "tool_call": toolCard(ev); break;
+    case "approval_request": approvalCard(ev); break;
+    case "approval_resolved": approvals.get(ev.id)?.remove(); approvals.delete(ev.id); break;
+    case "tool_result": {
+      const card = $("call-" + ev.id);
+      if (!card) break;
+      if (ev.isError) card.classList.add("err");
+      const pre = document.createElement("pre"); pre.textContent = ev.content;
+      card.appendChild(pre); scroll();
+      break;
+    }
+    case "provider_changed": setWhere(ev.provider, ev.model); $("provider").value = ev.provider; add("notice", "Switched to " + ev.provider + " · " + ev.model); break;
+    case "status": setStatus(ev.state); break;
+    case "notice": add("notice", ev.text); break;
+    case "error": add("error", ev.message); break;
+  }
+}
+
+async function command(body) {
+  const res = await fetch("/command", { method: "POST", headers: { "content-type": "application/json", "x-albireo-token": token }, body: JSON.stringify(body) });
+  if (!res.ok) add("error", (await res.json().catch(() => ({}))).error ?? "request failed");
+}
+
+const es = new EventSource("/events?token=" + encodeURIComponent(token));
+es.onmessage = (e) => handle(JSON.parse(e.data));
+es.onerror = () => { $("status").textContent = "disconnected"; $("status").classList.remove("running"); };
+
+$("form").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) return;
+  $("text").value = "";
+  command({ type: "send", text });
+};
+$("abort").onclick = () => command({ type: "abort" });
+$("switch").onclick = () => command({ type: "switch", provider: $("provider").value, model: $("model").value.trim() });
+</script>
+</body>
+</html>

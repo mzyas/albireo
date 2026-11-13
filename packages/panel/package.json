@@ -1,0 +1,6 @@
+{
+  "name": "@albireo/panel",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Static GUI panel, served by @albireo/server. No build step yet."
+}
