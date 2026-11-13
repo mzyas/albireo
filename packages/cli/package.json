@@ -1,5 +1,5 @@
 {
-  "name": "@albireo/tui",
+  "name": "@albireo/cli",
   "version": "0.0.1",
   "type": "module",
   "bin": {
@@ -8,11 +8,6 @@
   },
   "dependencies": {
     "@albireo/core": "workspace:*",
-    "@albireo/server": "workspace:*",
-    "ink": "^8.0.0",
-    "react": "^19.3.1"
-  },
-  "devDependencies": {
-    "@types/react": "^19.3.0"
+    "@albireo/server": "workspace:*"
   }
 }

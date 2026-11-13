@@ -4,7 +4,7 @@ import { toSpec, type AnyTool, type Risk } from "./tool.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import type { ContentPart, Message, Provider, StopReason, ToolSpec, Usage } from "./types.js";
 
-/** Events are what every front end (TUI, GUI panel) consumes. */
+/** Events are what every front end (GUI panel, CLI) consumes. */
 export type KernelEvent =
   | { type: "user"; text: string }
   | { type: "text_delta"; text: string }

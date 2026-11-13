@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import path from "node:path";
-import { render } from "ink";
 import { Session, builtinTools, defaultRegistry, type Risk } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
-import { App } from "./App.js";
 
-const HELP = `albireo — provider-neutral coding agent (TUI kernel + GUI panel)
+const HELP = `albireo — provider-neutral coding agent
 
 Usage: albireo [options]
+  Without --prompt, starts the kernel and prints the URL of the GUI panel.
+
   -p, --provider <id>   anthropic | openai            (default: anthropic)
   -m, --model <id>      model id                      (default: provider default)
       --cwd <dir>       workspace root                (default: current dir)
       --port <n>        panel port                    (default: random free port)
-      --no-panel        do not start the GUI panel server
+      --no-panel        with --prompt: do not start the panel server
       --yolo            auto-approve write + exec tools (use with care)
       --prompt <text>   run one prompt headlessly, print the result, exit
   -h, --help
@@ -32,9 +32,17 @@ const { values } = parseArgs({
   },
 });
 
+function fail(message: string, code = 1): never {
+  process.stderr.write(`albireo: ${message}\n`);
+  process.exit(code);
+}
+
 if (values.help) {
   process.stdout.write(HELP);
   process.exit(0);
+}
+if (values["no-panel"] && values.prompt === undefined) {
+  fail("--no-panel only makes sense together with --prompt (otherwise there is nothing to serve)", 2);
 }
 
 const autoApprove: Risk[] = values.yolo ? ["read", "write", "exec"] : ["read"];
@@ -50,16 +58,15 @@ try {
     autoApprove,
   });
 } catch (err) {
-  process.stderr.write(`albireo: ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
+  fail(err instanceof Error ? err.message : String(err));
 }
 
 const panel = values["no-panel"]
   ? undefined
   : await startPanelServer(session, { port: values.port ? Number(values.port) : 0 });
 
-if (values.prompt) {
-  // Headless mode: stream to stdout, deny anything that needs approval.
+if (values.prompt !== undefined) {
+  // Headless: stream to stdout, deny anything that needs approval.
   session.on((e) => {
     if (e.type === "text_delta") process.stdout.write(e.text);
     else if (e.type === "tool_call") process.stderr.write(`\n[tool] ${e.name} ${JSON.stringify(e.input)}\n`);
@@ -72,8 +79,18 @@ if (values.prompt) {
   process.exit(0);
 }
 
-const app = render(<App session={session} panelUrl={panel?.url} />);
-if (panel) session.notice(`GUI panel: ${panel.url}`);
-await app.waitUntilExit();
-await panel?.close();
+// Serve mode: the kernel keeps running; the GUI panel is the interface.
+session.on((e) => {
+  if (e.type === "tool_call") process.stderr.write(`[tool] ${e.name}\n`);
+  else if (e.type === "approval_request") process.stderr.write(`[approval needed] ${e.name} (${e.risk}) — answer it in the panel\n`);
+  else if (e.type === "error") process.stderr.write(`[error] ${e.message}\n`);
+});
+process.stdout.write(
+  `Albireo kernel running (${session.providerId} · ${session.model})\nGUI panel: ${panel!.url}\nPress Ctrl+C to stop.\n`,
+);
+await new Promise<void>((resolve) => {
+  process.once("SIGINT", resolve);
+  process.once("SIGTERM", resolve);
+});
+await panel!.close();
 process.exit(0);

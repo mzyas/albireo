@@ -3,12 +3,12 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Albireo — a provider-neutral coding agent: TUI kernel + GUI panel (OpenAI / Anthropic).",
+  "description": "Albireo — a provider-neutral coding agent: headless kernel + GUI panel (OpenAI / Anthropic).",
   "scripts": {
     "build": "tsc -b",
     "dev": "tsc -b -w",
     "test": "pnpm -r --if-present test",
-    "start": "node packages/tui/dist/cli.js"
+    "start": "node packages/cli/dist/cli.js"
   },
   "engines": {
     "node": ">=22"
