@@ -17,7 +17,7 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   run(input: z.infer<S>, ctx: ToolContext): Promise<string>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: a heterogeneous tool list needs to erase each tool's schema type
 export type AnyTool = Tool<any>;
 
 export function defineTool<S extends z.ZodType>(tool: Tool<S>): Tool<S> {

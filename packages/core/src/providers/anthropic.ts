@@ -1,15 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type {
-  ContentPart,
-  Message,
-  Provider,
-  StopReason,
-  StreamEvent,
-  TurnRequest,
-  TurnResult,
-} from "../types.js";
-
-import { normalizeHistory, replaysNatively, type HistoryTarget } from "../history.js";
+import { type HistoryTarget, normalizeHistory, replaysNatively } from "../history.js";
+import type { ContentPart, Message, Provider, StopReason, StreamEvent, TurnRequest, TurnResult } from "../types.js";
 
 type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
@@ -77,7 +68,8 @@ export class AnthropicProvider implements Provider {
     const content: ContentPart[] = [];
     for (const block of final.content) {
       if (block.type === "text") content.push({ type: "text", text: block.text });
-      else if (block.type === "tool_use") content.push({ type: "tool_call", id: block.id, name: block.name, input: block.input });
+      else if (block.type === "tool_use")
+        content.push({ type: "tool_call", id: block.id, name: block.name, input: block.input });
     }
 
     return {

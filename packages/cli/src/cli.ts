@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { parseArgs } from "node:util";
 import path from "node:path";
-import { Session, builtinTools, defaultRegistry, type Risk } from "@albireo/core";
+import { parseArgs } from "node:util";
+import { builtinTools, defaultRegistry, type Risk, Session } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
 
 const HELP = `albireo — provider-neutral coding agent
@@ -80,17 +80,19 @@ if (values.prompt !== undefined) {
 }
 
 // Serve mode: the kernel keeps running; the GUI panel is the interface.
+if (!panel) fail("internal error: panel server was not started");
 session.on((e) => {
   if (e.type === "tool_call") process.stderr.write(`[tool] ${e.name}\n`);
-  else if (e.type === "approval_request") process.stderr.write(`[approval needed] ${e.name} (${e.risk}) — answer it in the panel\n`);
+  else if (e.type === "approval_request")
+    process.stderr.write(`[approval needed] ${e.name} (${e.risk}) — answer it in the panel\n`);
   else if (e.type === "error") process.stderr.write(`[error] ${e.message}\n`);
 });
 process.stdout.write(
-  `Albireo kernel running (${session.providerId} · ${session.model})\nGUI panel: ${panel!.url}\nPress Ctrl+C to stop.\n`,
+  `Albireo kernel running (${session.providerId} · ${session.model})\nGUI panel: ${panel.url}\nPress Ctrl+C to stop.\n`,
 );
 await new Promise<void>((resolve) => {
   process.once("SIGINT", resolve);
   process.once("SIGTERM", resolve);
 });
-await panel!.close();
+await panel.close();
 process.exit(0);

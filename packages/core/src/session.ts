@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 import { z } from "zod";
-import { toSpec, type AnyTool, type Risk } from "./tool.js";
 import type { ProviderRegistry } from "./providers/index.js";
-import type { ContentPart, Message, Provider, StopReason, ToolSpec, Usage } from "./types.js";
+import { type AnyTool, type Risk, toSpec } from "./tool.js";
+import type { ContentPart, Message, Provider, StopReason, ToolSpec, TurnResult, Usage } from "./types.js";
 
 /** Events are what every front end (GUI panel, CLI) consumes. */
 export type KernelEvent =
@@ -144,7 +144,7 @@ export class Session {
         this.live = { text: "", reasoning: "" };
         const provider = this.provider;
         const model = this._model;
-        let res;
+        let res: TurnResult;
         try {
           res = await provider.runTurn(
             { model, system: this.system, messages: [...this.history], tools: this.toolSpecs, signal },
@@ -190,7 +190,9 @@ export class Session {
         for (const call of calls) {
           if (res.stopReason === "max_tokens") {
             // A tool input cut off at the limit may still parse; never run it.
-            results.push(this.fail(call.id, call.name, "Output was truncated at the token limit; retry with a smaller call."));
+            results.push(
+              this.fail(call.id, call.name, "Output was truncated at the token limit; retry with a smaller call."),
+            );
           } else if (signal.aborted) {
             results.push(this.fail(call.id, call.name, "Aborted by user."));
           } else {
@@ -222,10 +224,7 @@ export class Session {
     return { type: "tool_result", callId: id, content: message, isError: true };
   }
 
-  private async runCall(
-    call: Extract<ContentPart, { type: "tool_call" }>,
-    signal: AbortSignal,
-  ): Promise<ContentPart> {
+  private async runCall(call: Extract<ContentPart, { type: "tool_call" }>, signal: AbortSignal): Promise<ContentPart> {
     const tool = this.toolMap.get(call.name);
     this.emit({ type: "tool_call", id: call.id, name: call.name, input: call.input, risk: tool?.risk ?? "unknown" });
     if (!tool) return this.fail(call.id, call.name, `Unknown tool: ${call.name}`);
@@ -241,7 +240,7 @@ export class Session {
 
     try {
       let out = await tool.run(parsed.data, { cwd: this.cwd, signal });
-      if (out.length > MAX_TOOL_OUTPUT) out = out.slice(0, MAX_TOOL_OUTPUT) + "\n…[truncated]";
+      if (out.length > MAX_TOOL_OUTPUT) out = `${out.slice(0, MAX_TOOL_OUTPUT)}\n…[truncated]`;
       this.emit({ type: "tool_result", id: call.id, name: call.name, content: out, isError: false });
       return { type: "tool_result", callId: call.id, content: out };
     } catch (err) {

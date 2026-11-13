@@ -1,16 +1,16 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import test from "node:test";
 import {
+  builtinTools,
   ProviderRegistry,
+  resolveInside,
   ScriptedProvider,
   Session,
-  builtinTools,
-  resolveInside,
-  toOpenAIMessages,
   toAnthropicMessages,
+  toOpenAIMessages,
 } from "../dist/index.js";
 
 async function makeSession(steps) {
@@ -107,7 +107,10 @@ test("adapters translate neutral history for both vendors", () => {
     { role: "user", content: [{ type: "tool_result", callId: "call_1", content: "a\nb" }] },
   ];
   const oa = toOpenAIMessages("sys", history);
-  assert.deepEqual(oa.map((m) => m.role), ["system", "user", "assistant", "tool"]);
+  assert.deepEqual(
+    oa.map((m) => m.role),
+    ["system", "user", "assistant", "tool"],
+  );
   assert.equal(oa[2].tool_calls[0].function.arguments, '{"path":"."}');
   const an = toAnthropicMessages(history, "claude-opus-5-5");
   assert.equal(an[1].content[1].type, "tool_use");

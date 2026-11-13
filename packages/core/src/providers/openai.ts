@@ -1,15 +1,6 @@
 import OpenAI from "openai";
-import type {
-  Message,
-  Provider,
-  StopReason,
-  StreamEvent,
-  TurnRequest,
-  TurnResult,
-  ContentPart,
-} from "../types.js";
-
 import { normalizeHistory } from "../history.js";
+import type { ContentPart, Message, Provider, StopReason, StreamEvent, TurnRequest, TurnResult } from "../types.js";
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
@@ -74,7 +65,11 @@ export class OpenAIProvider implements Provider {
       const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
       if (reasoning) onEvent({ type: "reasoning_delta", text: reasoning });
       for (const tc of delta.tool_calls ?? []) {
-        const slot = (calls[tc.index] ??= { id: "", name: "", args: "" });
+        let slot = calls[tc.index];
+        if (!slot) {
+          slot = { id: "", name: "", args: "" };
+          calls[tc.index] = slot;
+        }
         if (tc.id) slot.id = tc.id;
         if (tc.function?.name) slot.name += tc.function.name;
         if (tc.function?.arguments) slot.args += tc.function.arguments;
@@ -124,7 +119,11 @@ function mapFinish(reason: string | null): StopReason {
 
 export function toOpenAIMessages(system: string, messages: Message[], model = ""): ChatMessage[] {
   const out: ChatMessage[] = [{ role: "system", content: system }];
-  const history = normalizeHistory(messages, { provider: "openai", model, api: OPENAI_CHAT_API }, { maxIdLength: MAX_TOOL_ID });
+  const history = normalizeHistory(
+    messages,
+    { provider: "openai", model, api: OPENAI_CHAT_API },
+    { maxIdLength: MAX_TOOL_ID },
+  );
   for (const m of history) {
     if (m.role === "assistant") {
       const text = m.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("");

@@ -1,4 +1,4 @@
-import type { Provider, StreamEvent, TurnRequest, TurnResult, ContentPart } from "../types.js";
+import type { ContentPart, Provider, StreamEvent, TurnRequest, TurnResult } from "../types.js";
 
 export interface ScriptStep {
   text?: string;

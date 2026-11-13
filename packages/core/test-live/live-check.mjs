@@ -6,7 +6,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Session, builtinTools, defaultRegistry } from "../dist/index.js";
+import { builtinTools, defaultRegistry, Session } from "../dist/index.js";
 
 const env = process.env;
 const have = {
@@ -18,7 +18,7 @@ const results = [];
 
 function record(name, ok, detail) {
   results.push({ name, ok });
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
 }
 
 async function step(name, fn) {
@@ -91,9 +91,12 @@ async function probeModels() {
       try {
         const { default: OpenAI } = await import("openai");
         const ids = [];
-        for await (const m of new OpenAI({ apiKey: env.OPENAI_API_KEY, baseURL: env.OPENAI_BASE_URL }).models.list()) ids.push(m.id);
+        for await (const m of new OpenAI({ apiKey: env.OPENAI_API_KEY, baseURL: env.OPENAI_BASE_URL }).models.list())
+          ids.push(m.id);
         const chatty = ids.filter((x) => /^(gpt|o\d|chatgpt)/.test(x)).sort();
-        console.log(`      "${id}" not usable. Chat-like models on this key (set ALBIREO_OPENAI_MODEL):\n      ${chatty.slice(0, 40).join(", ")}`);
+        console.log(
+          `      "${id}" not usable. Chat-like models on this key (set ALBIREO_OPENAI_MODEL):\n      ${chatty.slice(0, 40).join(", ")}`,
+        );
       } catch (err) {
         console.log(`      could not list models: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
       }
@@ -116,15 +119,24 @@ async function singleProvider(provider) {
   });
 
   await step(`${provider}: read-only tool call round trip`, async () => {
-    const r = await ask(session, "Use the list_dir tool on the current directory (path \".\"), then tell me the file name you saw.");
-    assert(r.calls.some((c) => c.name === "list_dir"), "model did not call list_dir");
+    const r = await ask(
+      session,
+      'Use the list_dir tool on the current directory (path "."), then tell me the file name you saw.',
+    );
+    assert(
+      r.calls.some((c) => c.name === "list_dir"),
+      "model did not call list_dir",
+    );
     assert(r.results.length > 0 && r.results.every((x) => !x.isError), "tool result was an error");
     assert(/hello-albireo/.test(r.text), `final answer missed the file name: ${JSON.stringify(r.text.slice(0, 120))}`);
     return `${r.ends.length} model turns, ${r.calls.length} tool call(s)`;
   });
 
   await step(`${provider}: write tool needs approval and runs`, async () => {
-    const r = await ask(session, "Create a file named note.txt containing exactly: hi from albireo. Use the write_file tool.");
+    const r = await ask(
+      session,
+      "Create a file named note.txt containing exactly: hi from albireo. Use the write_file tool.",
+    );
     assert(r.approvals.length >= 1, "no approval was requested for a write tool");
     const body = await readFile(path.join(cwd, "note.txt"), "utf8").catch(() => null);
     assert(body !== null, "note.txt was not created");
@@ -133,7 +145,10 @@ async function singleProvider(provider) {
   });
 
   await step(`${provider}: later turn recalls earlier tool history`, async () => {
-    const r = await ask(session, "What was the name of the file you listed earlier with list_dir? Answer with the name only.");
+    const r = await ask(
+      session,
+      "What was the name of the file you listed earlier with list_dir? Answer with the name only.",
+    );
     assert(/hello-albireo/.test(r.text), `reply: ${JSON.stringify(r.text.slice(0, 80))}`);
     return "history (incl. native blocks) replayed";
   });
@@ -148,7 +163,7 @@ async function crossProvider(from, to) {
   console.log(`\n== switch ${from} -> ${to} -> ${from}`);
 
   await step(`${from}->${to}: tool turn on ${from}`, async () => {
-    const r = await ask(session, "Use the list_dir tool on \".\" and tell me the file name.");
+    const r = await ask(session, 'Use the list_dir tool on "." and tell me the file name.');
     assert(r.calls.length > 0 && /hello-albireo/.test(r.text), `reply: ${JSON.stringify(r.text.slice(0, 80))}`);
   });
   session.switchProvider(to);
@@ -159,14 +174,16 @@ async function crossProvider(from, to) {
   });
   session.switchProvider(from);
   await step(`${to}->${from}: back on ${from} after a foreign turn`, async () => {
-    const r = await ask(session, "Use the list_dir tool on \".\" once more and tell me how many entries there are.");
+    const r = await ask(session, 'Use the list_dir tool on "." once more and tell me how many entries there are.');
     assert(r.calls.length > 0, "model did not call the tool");
     return `now on ${session.providerId} · ${session.model}`;
   });
   await rm(cwd, { recursive: true, force: true });
 }
 
-console.log(`credentials: anthropic=${have.anthropic ? "present" : "MISSING"}  openai=${have.openai ? "present" : "MISSING"}`);
+console.log(
+  `credentials: anthropic=${have.anthropic ? "present" : "MISSING"}  openai=${have.openai ? "present" : "MISSING"}`,
+);
 if (!have.anthropic && !have.openai) {
   console.log("Nothing to test. Set ANTHROPIC_API_KEY and/or OPENAI_API_KEY in this shell and rerun.");
   process.exit(0);
