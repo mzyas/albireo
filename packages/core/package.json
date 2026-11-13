@@ -11,7 +11,8 @@
     }
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "test:live": "node test-live/live-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
