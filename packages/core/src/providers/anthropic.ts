@@ -7,10 +7,15 @@ type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
 
 /** Wire API tag stored on native payloads so they only replay against the same API. */
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
+export const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
+/** Pass this explicitly to keep the SDK from reading ANTHROPIC_BASE_URL. */
+export const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
 const MAX_TOOL_ID = 64;
 
 export interface AnthropicOptions {
   apiKey?: string;
+  /** Unset: the SDK falls back to ANTHROPIC_BASE_URL, then its built-in default. */
+  baseURL?: string;
   model?: string;
   /** Server-side refusal fallback (beta). On by default; set false to disable. */
   fallbacks?: boolean;
@@ -26,8 +31,11 @@ export class AnthropicProvider implements Provider {
 
   constructor(opts: AnthropicOptions = {}) {
     // With no explicit key the SDK resolves ANTHROPIC_API_KEY / auth token / `ant auth login` profile.
-    this.client = new Anthropic(opts.apiKey ? { apiKey: opts.apiKey } : undefined);
-    this.defaultModel = opts.model ?? "claude-opus-5-5";
+    this.client = new Anthropic({
+      ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+      ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
+    });
+    this.defaultModel = opts.model ?? ANTHROPIC_DEFAULT_MODEL;
     this.fallbacks = opts.fallbacks ?? true;
     this.effort = opts.effort ?? "high";
   }

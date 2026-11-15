@@ -5,11 +5,15 @@ import type { ContentPart, Message, Provider, StopReason, StreamEvent, TurnReque
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
 export const OPENAI_CHAT_API = "openai-chat";
+export const OPENAI_DEFAULT_MODEL = "gpt-5";
+/** Pass this explicitly to keep the SDK from reading OPENAI_BASE_URL. */
+export const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 /** Chat Completions rejects tool_call ids longer than 40 characters. */
 const MAX_TOOL_ID = 40;
 
 export interface OpenAIOptions {
   apiKey?: string;
+  /** Unset: the SDK falls back to OPENAI_BASE_URL, then its built-in default. */
   baseURL?: string;
   model?: string;
 }
@@ -22,7 +26,7 @@ export class OpenAIProvider implements Provider {
 
   constructor(opts: OpenAIOptions = {}) {
     this.client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-    this.defaultModel = opts.model ?? "gpt-5";
+    this.defaultModel = opts.model ?? OPENAI_DEFAULT_MODEL;
   }
 
   async runTurn(req: TurnRequest, onEvent: (e: StreamEvent) => void): Promise<TurnResult> {

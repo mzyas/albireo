@@ -1,13 +1,27 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { builtinTools, defaultRegistry, type Risk, Session } from "@albireo/core";
+import { builtinTools, type Risk, Session } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
+import {
+  createVaultRegistry,
+  hasProviderKey,
+  registerVaultProviders,
+  SecretManager,
+  VaultError,
+  VaultStore,
+} from "@albireo/vault";
+import { processKeysIO, runKeysCommand } from "./keys.js";
+import { CancelledError, promptHidden } from "./tty.js";
 
 const HELP = `albireo — provider-neutral coding agent
 
 Usage: albireo [options]
+       albireo keys [status | set <provider> | clear <provider>]   (see albireo keys --help)
   Without --prompt, starts the kernel and prints the URL of the GUI panel.
+  API keys live in an encrypted vault in your user config dir; manage them under
+  "API Keys" in the panel or with \`albireo keys\`. Environment variables are not read
+  for credentials.
 
   -p, --provider <id>   anthropic | openai            (default: anthropic)
   -m, --model <id>      model id                      (default: provider default)
@@ -18,6 +32,10 @@ Usage: albireo [options]
       --prompt <text>   run one prompt headlessly, print the result, exit
   -h, --help
 `;
+
+if (process.argv[2] === "keys") {
+  process.exit(await runKeysCommand(process.argv.slice(3), processKeysIO()));
+}
 
 const { values } = parseArgs({
   options: {
@@ -47,10 +65,37 @@ if (values["no-panel"] && values.prompt === undefined) {
 
 const autoApprove: Risk[] = values.yolo ? ["read", "write", "exec"] : ["read"];
 
+// Credentials come only from the vault. Missing keys become placeholder providers, so the panel
+// can still start and be used to add them.
+const vault = await VaultStore.open();
+const registry = createVaultRegistry(vault);
+process.once("exit", () => vault.lock());
+
+if (values.prompt !== undefined) {
+  if (vault.state === "locked" && vault.protection === "passphrase") {
+    if (!process.stdin.isTTY) {
+      fail("the vault is locked and stdin is not a terminal; run albireo without --prompt and unlock it in the panel");
+    }
+    try {
+      await vault.unlock(await promptHidden("Vault passphrase: "));
+    } catch (err) {
+      if (err instanceof CancelledError) fail("cancelled", 130);
+      fail(err instanceof VaultError ? err.message : "could not unlock the vault");
+    }
+    registerVaultProviders(registry, vault);
+  }
+  if (!hasProviderKey(vault, values.provider)) {
+    if (vault.error) fail(vault.error);
+    fail(
+      `no API key for "${values.provider}" in the vault. Add it with \`albireo keys set ${values.provider}\`, or under "API Keys" in the panel.`,
+    );
+  }
+}
+
 let session: Session;
 try {
   session = new Session({
-    providers: defaultRegistry(),
+    providers: registry,
     provider: values.provider,
     model: values.model,
     tools: builtinTools,
@@ -61,9 +106,10 @@ try {
   fail(err instanceof Error ? err.message : String(err));
 }
 
+const secrets = new SecretManager({ vault, registry, session });
 const panel = values["no-panel"]
   ? undefined
-  : await startPanelServer(session, { port: values.port ? Number(values.port) : 0 });
+  : await startPanelServer(session, { port: values.port ? Number(values.port) : 0, secrets });
 
 if (values.prompt !== undefined) {
   // Headless: stream to stdout, deny anything that needs approval.
@@ -87,8 +133,15 @@ session.on((e) => {
     process.stderr.write(`[approval needed] ${e.name} (${e.risk}) — answer it in the panel\n`);
   else if (e.type === "error") process.stderr.write(`[error] ${e.message}\n`);
 });
+const vaultLine = (() => {
+  if (vault.error) return `Vault: ${vault.error}`;
+  if (vault.state === "uninitialized") return `Vault: empty — add API keys under "API Keys" in the panel`;
+  if (vault.state === "locked") return `Vault: locked — unlock it under "API Keys" in the panel`;
+  if (!hasProviderKey(vault, session.providerId)) return `Vault: no ${session.providerId} key — add it in the panel`;
+  return `Vault: unlocked (${vault.protection})`;
+})();
 process.stdout.write(
-  `Albireo kernel running (${session.providerId} · ${session.model})\nGUI panel: ${panel.url}\nPress Ctrl+C to stop.\n`,
+  `Albireo kernel running (${session.providerId} · ${session.model})\n${vaultLine}\nGUI panel: ${panel.url}\nPress Ctrl+C to stop.\n`,
 );
 await new Promise<void>((resolve) => {
   process.once("SIGINT", resolve);

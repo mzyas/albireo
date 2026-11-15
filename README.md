@@ -15,11 +15,12 @@ pnpm install
 pnpm build
 ```
 
-密钥只从环境变量读取（不读 `.env`，也不保存），可用的变量见 [`.env.example`](.env.example)。
+API 密钥在面板的 **API Keys** 里填写，或者在终端里用 `keys` 子命令填写。密钥加密保存在用户配置目录（不在工作区里），主密钥由系统凭据库保管，没有系统凭据库时用你设置的口令保护。Albireo 不从环境变量读取密钥。
 
 ```bash
 node packages/cli/dist/cli.js              # 启动内核，在浏览器里打开打印出的面板地址
 node packages/cli/dist/cli.js --prompt "…" # 无头运行一次后退出
+node packages/cli/dist/cli.js keys set anthropic  # 在终端里保存 API 密钥（输入不回显）
 node packages/cli/dist/cli.js --help       # 全部参数
 ```
 

@@ -7,6 +7,8 @@
 - `GET /`：返回面板的 `index.html`（默认来自同级的 `packages/panel/public/`，可以用 `opts.publicDir` 覆盖）。
 - `GET /events`：SSE。先发一条 `{ type: "snapshot", ... }`，之后转发 `Session` 的每个事件。订阅和取快照在同一个 tick 里完成，所以事件不会漏也不会重复。
 - `POST /command`：JSON body，`type` 取 `send | approve | abort | switch`，成功时返回 202。可用命令以源码里的 `switch` 为准。
+- `/secrets`（`GET`）和 `/secrets/{unlock,provider,lock}`（`POST`）：管理加密 vault，交给 `opts.secrets`（`@albireo/vault` 的 `SecretManager`）处理；没传时 `GET /secrets` 返回 `{ enabled: false }`。请求和响应的字段以 `SecretManager` 的类型为准，错误码映射见 `VAULT_STATUS`。
+- vault 变化不是 Session 事件：server 会向所有 SSE 连接推一条 `{ type: "secrets_changed" }`，面板收到后重新 `GET /secrets`。
 
 ## 安全（这是硬性要求，不是可选项）
 
@@ -19,6 +21,8 @@ Agent 能执行任意命令，所以这个服务必须锁死：
 
 新增路由时，它必须经过同一套检查（检查写在 handler 开头，别在它前面插路由）。要做远程访问是另一件事，需要单独设计，不要放宽现有检查。
 
+`/secrets` 路由额外要求：响应一律 `cache-control: no-store`；任何响应和 SSE 事件里都不能出现明文 key；错误只返回 `VaultError` 的消息（JSON 解析错误也不回显，因为 V8 的消息会引用 body）。
+
 ## 测试
 
-目前没有专门的测试。改协议时，记得同步修改 `packages/panel/public/index.html` 里的调用方。
+`test/*.test.mjs`：`node --test`，起真实服务、用 `MemoryKeyProtector` 的临时 vault，覆盖 token / Host 校验和 `/secrets` 不泄漏明文。改协议时，记得同步修改 `packages/panel/public/index.html` 里的调用方。

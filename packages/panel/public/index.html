@@ -43,7 +43,25 @@
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 16px; }
   footer form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
   footer input { flex: 1; }
+  .badge { display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 5px; border-radius: 999px; background: var(--warn); color: var(--panel); font-size: 11px; line-height: 16px; text-align: center; }
+  dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 16px; }
+  dialog::backdrop { background: rgb(0 0 0 / .4); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .dlg-head h2 { font-size: 16px; margin: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .stack { display: grid; gap: 6px; }
+  .stack label { font-size: 12px; color: var(--muted); }
+  .stack input { width: 100%; }
+  .prov { border-top: 1px solid var(--line); padding: 12px 0; }
+  .prov-head { display: flex; align-items: center; gap: 8px; }
+  .prov-head h3 { font-size: 14px; margin: 0; }
+  .pill.ok { color: var(--accent); border-color: var(--accent); }
+  .actions { display: flex; gap: 8px; margin-top: 4px; }
+  #keys-msg { min-height: 1.5em; margin: 8px 0 0; font-size: 13px; }
+  #keys-msg.err { color: var(--err); }
   @media (max-width: 520px) { header .spacer { display: none; } }
+  /* Last, so it beats the display rules above that share its specificity. */
+  [hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -56,7 +74,27 @@
   <input id="model" placeholder="model (default)" size="18" aria-label="Model">
   <button id="switch" type="button">Switch</button>
   <button id="abort" type="button" disabled>Stop</button>
+  <button id="keys-open" type="button" hidden>API Keys<span id="keys-badge" class="badge" hidden>!</span></button>
 </header>
+<dialog id="keys" aria-labelledby="keys-title">
+  <div class="dlg-head">
+    <h2 id="keys-title">API Keys</h2>
+    <button id="keys-close" type="button" aria-label="Close">×</button>
+  </div>
+  <p id="keys-state" class="muted"></p>
+  <form id="unlock-form" class="stack" hidden>
+    <label for="passphrase">Passphrase</label>
+    <input id="passphrase" type="password" autocomplete="current-password" required>
+    <div id="confirm-row" class="stack" hidden>
+      <label for="passphrase2">Repeat passphrase</label>
+      <input id="passphrase2" type="password" autocomplete="new-password">
+    </div>
+    <div class="actions"><button id="unlock-submit" type="submit" class="primary">Unlock</button></div>
+  </form>
+  <div id="provider-forms" hidden></div>
+  <div class="actions"><button id="lock-btn" type="button" hidden>Lock vault</button></div>
+  <p id="keys-msg" role="status"></p>
+</dialog>
 <main id="log"></main>
 <footer>
   <!-- biome-ignore lint/a11y/noAutofocus: the message box is the panel's only primary input -->
@@ -101,7 +139,186 @@ function setStatus(state) {
   $("switch").disabled = running;
 }
 
-function setWhere(provider, model) { $("where").textContent = `${provider} · ${model}`; }
+function setWhere(provider, model) {
+  $("where").textContent = `${provider} · ${model}`;
+  currentProvider = provider;
+  renderKeys();
+}
+
+// ---- API keys (encrypted vault; the server only ever returns masked hints) ----
+const PROVIDERS = [["anthropic", "Anthropic"], ["openai", "OpenAI (and compatible endpoints)"]];
+const forms = new Map();
+let secrets = null;
+let currentProvider = null;
+
+async function api(path, body) {
+  const headers = { "x-albireo-token": token };
+  const init = body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+  const res = await fetch(path, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `request failed (${res.status})`);
+  return data;
+}
+
+async function loadSecrets() {
+  try { secrets = await api("/secrets"); } catch { secrets = null; }
+  renderKeys();
+}
+
+function keysMsg(text, isError = false) {
+  $("keys-msg").textContent = text;
+  $("keys-msg").classList.toggle("err", isError);
+}
+
+function describeVault(s) {
+  if (s.error) return s.error;
+  const holder = s.keychain ?? "your OS credential store";
+  if (s.state === "uninitialized") {
+    return s.protection === "os-keychain"
+      ? `No keys saved yet. They will be encrypted with a key held by ${holder}.`
+      : "No keys saved yet. No OS credential store is available here, so choose a passphrase (at least 8 characters) to protect them.";
+  }
+  if (s.state === "locked") return "The vault is locked. Enter its passphrase to use the saved keys.";
+  return s.protection === "passphrase" ? "Keys are encrypted with your passphrase." : `Keys are encrypted with a key held by ${holder}.`;
+}
+
+function addField(parent, id, label, type) {
+  const l = document.createElement("label");
+  l.htmlFor = id;
+  l.textContent = label;
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = type;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  parent.append(l, input);
+  return input;
+}
+
+function buildProviderForm(id, label) {
+  const form = document.createElement("form");
+  form.className = "prov stack";
+  const head = document.createElement("div");
+  head.className = "prov-head";
+  const h = document.createElement("h3");
+  h.textContent = label;
+  const badge = document.createElement("span");
+  badge.className = "pill";
+  head.append(h, badge);
+  form.append(head);
+  const key = addField(form, `${id}-key`, "API key", "password");
+  const base = addField(form, `${id}-base`, "Base URL (optional)", "url");
+  const model = addField(form, `${id}-model`, "Default model (optional)", "text");
+  base.placeholder = "provider default";
+  model.placeholder = "provider default";
+  const row = document.createElement("div");
+  row.className = "actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "primary";
+  save.textContent = "Save";
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.textContent = "Clear key";
+  row.append(save, clear);
+  form.append(row);
+  for (const input of [base, model]) input.addEventListener("input", () => { form.dataset.dirty = "1"; });
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const patch = { baseURL: base.value.trim(), model: model.value.trim() };
+    if (key.value.trim()) patch.apiKey = key.value.trim();
+    saveProvider(id, patch);
+  };
+  clear.onclick = () => saveProvider(id, { clearApiKey: true });
+  forms.set(id, { form, badge, key, base, model, clear });
+  return form;
+}
+
+function renderProviderForm(id, view) {
+  const f = forms.get(id);
+  f.badge.textContent = view.hasKey ? "encrypted" : "not configured";
+  f.badge.classList.toggle("ok", view.hasKey);
+  f.key.placeholder = view.hasKey ? `configured (${view.keyHint}) — leave blank to keep` : "paste API key";
+  f.clear.hidden = !view.hasKey;
+  if (!f.form.dataset.dirty) {
+    f.base.value = view.baseURL ?? "";
+    f.model.value = view.model ?? "";
+  }
+}
+
+function renderKeys() {
+  const open = $("keys-open");
+  const s = secrets;
+  open.hidden = !s?.enabled;
+  if (!s?.enabled) return;
+  const current = currentProvider && s.providers[currentProvider];
+  const attention = s.state !== "unlocked" || (current && !current.hasKey);
+  $("keys-badge").hidden = !attention;
+  open.setAttribute("aria-label", attention ? "API Keys (needs attention)" : "API Keys");
+  open.title = attention ? (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)) : "";
+
+  const formsUsable = s.state === "unlocked" || (s.state === "uninitialized" && s.protection === "os-keychain");
+  const creating = s.state === "uninitialized";
+  $("keys-state").textContent = describeVault(s);
+  $("unlock-form").hidden = formsUsable || s.protection !== "passphrase";
+  $("confirm-row").hidden = !creating;
+  $("passphrase").autocomplete = creating ? "new-password" : "current-password";
+  $("passphrase2").required = creating;
+  $("unlock-submit").textContent = creating ? "Create vault" : "Unlock";
+  $("provider-forms").hidden = !formsUsable;
+  $("lock-btn").hidden = !(s.state === "unlocked" && s.protection === "passphrase");
+  for (const [id] of PROVIDERS) renderProviderForm(id, s.providers[id]);
+}
+
+async function saveProvider(id, patch) {
+  keysMsg("Saving…");
+  try {
+    secrets = await api("/secrets/provider", { provider: id, ...patch });
+    const f = forms.get(id);
+    f.key.value = "";
+    delete f.form.dataset.dirty;
+    renderKeys();
+    keysMsg(secrets.refreshPending ? "Saved. It takes effect when the current turn ends." : "Saved.");
+  } catch (err) {
+    keysMsg(err.message, true);
+  }
+}
+
+function clearSecretInputs() {
+  for (const f of forms.values()) f.key.value = "";
+  $("passphrase").value = "";
+  $("passphrase2").value = "";
+}
+
+$("provider-forms").append(...PROVIDERS.map(([id, label]) => buildProviderForm(id, label)));
+$("keys-open").onclick = () => { keysMsg(""); renderKeys(); $("keys").showModal(); loadSecrets(); };
+$("keys-close").onclick = () => $("keys").close();
+$("keys").addEventListener("close", clearSecretInputs);
+$("unlock-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const passphrase = $("passphrase").value;
+  if (secrets?.state === "uninitialized" && passphrase !== $("passphrase2").value) {
+    keysMsg("The passphrases do not match.", true);
+    return;
+  }
+  try {
+    secrets = await api("/secrets/unlock", { passphrase });
+    clearSecretInputs();
+    renderKeys();
+    keysMsg("Unlocked.");
+  } catch (err) {
+    keysMsg(err.message, true);
+  }
+};
+$("lock-btn").onclick = async () => {
+  try {
+    secrets = await api("/secrets/lock", {});
+    renderKeys();
+    keysMsg("Locked.");
+  } catch (err) {
+    keysMsg(err.message, true);
+  }
+};
 
 function approvalCard(ev) {
   const el = document.createElement("div");
@@ -137,7 +354,9 @@ function handle(ev) {
       for (const p of ev.pending) approvalCard(p);
       setStatus(ev.status); setWhere(ev.provider, ev.model);
       $("provider").replaceChildren(...ev.providers.map((p) => new Option(p, p, false, p === ev.provider)));
+      loadSecrets();
       break;
+    case "secrets_changed": loadSecrets(); break;
     case "user": add("user", ev.text); break;
     case "text_delta": ensureLive().textEl.textContent += ev.text; scroll(); break;
     case "reasoning_delta": ensureLive().reasoningEl.textContent += ev.text; scroll(); break;
