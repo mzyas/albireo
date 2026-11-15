@@ -6,8 +6,12 @@
     "albireo": "dist/cli.js",
     "albi": "dist/cli.js"
   },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
   "dependencies": {
     "@albireo/core": "workspace:*",
-    "@albireo/server": "workspace:*"
+    "@albireo/server": "workspace:*",
+    "@albireo/vault": "workspace:*"
   }
 }
