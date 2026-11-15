@@ -3,12 +3,15 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Session } from "@albireo/core";
+import { type SecretManager, VaultError, type VaultErrorCode } from "@albireo/vault";
 
 export interface PanelServerOptions {
   /** 0 (default) picks a free port. */
   port?: number;
   /** Directory holding index.html. Defaults to the sibling @albireo/panel package. */
   publicDir?: URL;
+  /** Enables the /secrets routes. Without it, GET /secrets answers `{ enabled: false }`. */
+  secrets?: SecretManager;
 }
 
 export interface PanelServer {
@@ -42,6 +45,70 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+const VAULT_STATUS: Record<VaultErrorCode, number> = {
+  invalid: 400,
+  bad_key: 401,
+  uninitialized: 409,
+  locked: 409,
+  corrupt: 409,
+  unavailable: 503,
+};
+
+function replyJson(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
+}
+
+async function readJsonObject(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readBody(req));
+  } catch {
+    // Not the parser's message: it quotes the body, which may hold a key.
+    throw new VaultError("invalid", "The request body must be JSON.");
+  }
+  if (typeof value !== "object" || value === null)
+    throw new VaultError("invalid", "The request body must be an object.");
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Vault routes. Responses carry status and masked hints only, never a key. Called after the
+ * Host and token checks, like every other route.
+ */
+async function handleSecrets(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+  secrets: SecretManager | undefined,
+): Promise<void> {
+  try {
+    if (req.method === "GET" && pathname === "/secrets") {
+      replyJson(res, 200, secrets ? secrets.status() : { enabled: false });
+      return;
+    }
+    if (req.method !== "POST" || !secrets) {
+      replyJson(res, 404, { error: "not found" });
+      return;
+    }
+    switch (pathname) {
+      case "/secrets/unlock":
+        replyJson(res, 200, { ok: true, ...(await secrets.unlock(await readJsonObject(req))) });
+        return;
+      case "/secrets/provider":
+        replyJson(res, 200, await secrets.setProvider(await readJsonObject(req)));
+        return;
+      case "/secrets/lock":
+        replyJson(res, 200, await secrets.lock());
+        return;
+      default:
+        replyJson(res, 404, { error: "not found" });
+    }
+  } catch (err) {
+    if (err instanceof VaultError) replyJson(res, VAULT_STATUS[err.code], { error: err.message, code: err.code });
+    else replyJson(res, 500, { error: "internal error" }); // details may include file paths or key material
+  }
+}
+
 /**
  * Local-only bridge between a running Session and the GUI panel.
  * The agent can execute commands, so the server is locked down: loopback bind,
@@ -51,6 +118,11 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
   const token = randomBytes(24).toString("hex");
   const publicDir = opts.publicDir ?? new URL("../../panel/public/", import.meta.url);
   let port = 0;
+  // Vault changes aren't session events; tell every connected panel to re-fetch GET /secrets.
+  const streams = new Set<http.ServerResponse>();
+  const offSecrets = opts.secrets?.onChange(() => {
+    for (const s of streams) s.write(`data: ${JSON.stringify({ type: "secrets_changed" })}\n\n`);
+  });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -82,11 +154,18 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
         // Subscribe and snapshot in the same tick so no event is missed or duplicated.
         const off = session.on((e) => send(e));
         send({ type: "snapshot", ...session.snapshot() });
+        streams.add(res);
         const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
         req.on("close", () => {
           clearInterval(keepAlive);
+          streams.delete(res);
           off();
         });
+        return;
+      }
+
+      if (url.pathname === "/secrets" || url.pathname.startsWith("/secrets/")) {
+        await handleSecrets(req, res, url.pathname, opts.secrets);
         return;
       }
 
@@ -134,6 +213,7 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
     url: `http://127.0.0.1:${port}/?token=${token}`,
     close: () =>
       new Promise<void>((resolve) => {
+        offSecrets?.();
         server.closeAllConnections();
         server.close(() => resolve());
       }),

@@ -204,6 +204,9 @@ importers:
       '@albireo/core':
         specifier: workspace:*
         version: link:../core
+      '@albireo/vault':
+        specifier: workspace:*
+        version: link:../vault
 
   packages/vault:
     dependencies:
