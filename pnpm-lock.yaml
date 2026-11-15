@@ -205,6 +205,12 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/vault:
+    dependencies:
+      '@albireo/core':
+        specifier: workspace:*
+        version: link:../core
+
 packages:
 
   '@anthropic-ai/sdk@1.8.0':
