@@ -2,8 +2,22 @@ import type { Provider } from "../types.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAIProvider } from "./openai.js";
 
-export { ANTHROPIC_MESSAGES_API, AnthropicProvider, toAnthropicMessages } from "./anthropic.js";
-export { OPENAI_CHAT_API, OpenAIProvider, toOpenAIMessages } from "./openai.js";
+export {
+  ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_DEFAULT_MODEL,
+  ANTHROPIC_MESSAGES_API,
+  type AnthropicOptions,
+  AnthropicProvider,
+  toAnthropicMessages,
+} from "./anthropic.js";
+export {
+  OPENAI_CHAT_API,
+  OPENAI_DEFAULT_BASE_URL,
+  OPENAI_DEFAULT_MODEL,
+  type OpenAIOptions,
+  OpenAIProvider,
+  toOpenAIMessages,
+} from "./openai.js";
 export { ScriptedProvider, type ScriptStep } from "./scripted.js";
 
 /** Lazily constructs providers so a missing key for one vendor doesn't block the other. */
@@ -32,6 +46,10 @@ export class ProviderRegistry {
   }
 }
 
+/**
+ * Reads keys, endpoints and models from the environment. The CLI does not use this (its registry
+ * comes from the encrypted vault in @albireo/vault); test-live does.
+ */
 export function defaultRegistry(env: NodeJS.ProcessEnv = process.env): ProviderRegistry {
   return new ProviderRegistry()
     .register("anthropic", () => new AnthropicProvider({ model: env.ALBIREO_ANTHROPIC_MODEL }))

@@ -13,6 +13,8 @@
 | `src/tools/builtin.ts` | 内置工具和 `resolveInside`（路径限制在工作区内）                                                                 |
 | `src/providers/`       | `anthropic.ts`、`openai.ts`、`scripted.ts`（测试用）、`index.ts`（`ProviderRegistry`、`defaultRegistry`）        |
 
+各适配器导出默认模型和默认 `baseURL` 常量（`*_DEFAULT_MODEL`、`*_DEFAULT_BASE_URL`），vault 用它们显式构造客户端。`defaultRegistry` 从环境变量读配置，只给 `test-live` 用；CLI 的 registry 来自 `@albireo/vault`。
+
 ## 不变量（改动时别破坏）
 
 - **历史是中立的**。`Session.history` 只存 `types.ts` 里的类型；厂商格式只在适配器内部出现，换厂商时历史原样带过去。
@@ -20,6 +22,8 @@
 - **发请求前必须先 `normalizeHistory`**。每个适配器在转换成厂商格式前都要调用它，并传入自己的 `HistoryTarget` 和工具调用 ID 长度上限。它负责改写 ID、补齐缺失的工具结果、丢掉孤立结果和空文本。新适配器同样要调用它。
 - **每次调用工具都要先过一遍检查**：先用 zod 校验入参，失败时作为错误结果回给模型、不执行；再看 `risk` 在不在 `autoApprove` 里，不在就发 `approval_request` 等待。任何新的执行路径都不能绕过这两步。
 - **工具不能越出工作区**：涉及路径的工具必须通过 `resolveInside(cwd, p)`。
+- **子进程拿不到 LLM 凭据**：`run_command` 用 `commandEnv()` 剥掉已知的 API key 环境变量（名字大小写不敏感）。新的子进程工具也要这样做。
+- **换凭据不打断对话**：`refreshProvider()` 从 registry 重新取当前 provider，只能在两轮之间调用；显式指定过的模型保持不变。
 - **事件**：`text_delta`/`reasoning_delta` 只是临时的，不记日志；其余事件都进日志，供后连上的客户端通过 `snapshot()` 回放。新增事件类型时要同时考虑 server 和 panel 怎么处理。
 - `Session` 在 `assistant_end` 之后给助手消息补上 `meta`；适配器不用自己填。
 

@@ -67,12 +67,15 @@ export class Session {
   private registry: ProviderRegistry;
   private provider: Provider;
   private _model: string;
+  /** True when the model was chosen explicitly, so a provider refresh keeps it. */
+  private modelPinned: boolean;
   readonly cwd: string;
 
   constructor(opts: SessionOptions) {
     this.registry = opts.providers;
     this.provider = this.registry.get(opts.provider);
     this._model = opts.model ?? this.provider.defaultModel;
+    this.modelPinned = opts.model !== undefined;
     this.toolMap = new Map(opts.tools.map((t) => [t.name, t]));
     this.toolSpecs = opts.tools.map(toSpec);
     this.autoApprove = new Set(opts.autoApprove ?? ["read"]);
@@ -116,7 +119,21 @@ export class Session {
     if (this.running) throw new Error("Cannot switch provider while a turn is running");
     this.provider = this.registry.get(id);
     this._model = model ?? this.provider.defaultModel;
+    this.modelPinned = model !== undefined;
     this.emit({ type: "provider_changed", provider: this.providerId, model: this._model });
+  }
+
+  /**
+   * Re-read the current provider from the registry, e.g. after its credentials were re-registered.
+   * Between turns only. An explicitly chosen model is kept; otherwise the new default applies.
+   * Emits `provider_changed` only when the model actually changes.
+   */
+  refreshProvider(): void {
+    if (this.running) throw new Error("Cannot refresh provider while a turn is running");
+    const before = this._model;
+    this.provider = this.registry.get(this.provider.id);
+    if (!this.modelPinned) this._model = this.provider.defaultModel;
+    if (this._model !== before) this.emit({ type: "provider_changed", provider: this.providerId, model: this._model });
   }
 
   approve(id: string, allow: boolean): void {

@@ -60,6 +60,18 @@ const writeFileTool = defineTool({
 
 const MAX_OUT = 30_000;
 
+/** Credentials a parent shell may still export; commands run by the model never see them. */
+const SECRET_ENV = new Set(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_ADMIN_KEY"]);
+
+/** Copy of `env` without known LLM credentials. Names compare case-insensitively (Windows). */
+export function commandEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!SECRET_ENV.has(name.toUpperCase())) out[name] = value;
+  }
+  return out;
+}
+
 const runCommandTool = defineTool({
   name: "run_command",
   description: "Run a shell command in the workspace root (60s timeout). Returns stdout, stderr and the exit code.",
@@ -69,6 +81,7 @@ const runCommandTool = defineTool({
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd,
+        env: commandEnv(),
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
         signal,
