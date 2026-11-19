@@ -25,14 +25,14 @@
 ## 不变量（改动时别破坏）
 
 - **绝不碰 `process.env` 里的凭据**。需要凭据的 provider（`auth: "api-key" | "bearer"`）没有 key 时注册 `UnconfiguredProvider`，不构造 SDK 客户端（SDK 会自己去读环境变量）；免鉴权本地端点（`auth: "none"`）直接可用且通过无害占位 + 屏蔽认证头防止 SDK 回退环境变量。`baseURL` 总是显式传入。
-- **非敏感配置与凭据分离**：`providers.json` 与 `vault.enc.json` 同目录（永不进工作区），严禁出现 `apiKey` / `authToken`。URL query 只允许 `api-version` / `version` 这类版本参数；header 采用白名单（见 `credentials.ts`），只收非凭据元数据头，`null` 抑制头仍允许。损坏的 `providers.json` 不会阻断启动；首次打开回退到内置 provider，运行中重载则保留上次有效的定义并记录 `error`。vault 里的 baseURL override 也走同一套 URL 校验。
-- **密钥不出现在任何响应或事件里**。对外只给 `ProviderSecretView`（`hasKey`、`maskApiKey` 的提示、配置元信息）；自定义 header 只暴露名字，值一律替换为掩码。Provider 抛出的错误经 `redactError` 去掉 key。
+- **非敏感配置与凭据分离**：`providers.json` 与 `vault.enc.json` 同目录（永不进工作区），严禁出现 `apiKey` / `authToken`。URL query 只允许版本类参数，header 采用白名单，只收非凭据元数据头（两份清单都在 `credentials.ts`），`null` 抑制头仍允许。损坏的 `providers.json` 不会阻断启动：整个文件读不了或不是合法 JSON 时，首次打开回退到内置 provider，运行中重载则保留上次有效的定义；单个条目无效时只跳过该条目（运行中重载保留它上次的有效版本），其余条目照常加载。两种情况都记录 `error`。写入前仍要求整个文件有效，避免悄悄丢掉用户手写的条目。vault 里的 baseURL override 也走同一套 URL 校验。
+- **密钥不出现在任何响应或事件里**。对外只给 `ProviderSecretView`（`hasKey`、`maskApiKey` 的提示、配置元信息）；自定义 header（含 `models[].headers`）只暴露名字，值一律替换为掩码，`null` 抑制头保持 `null`。Provider 抛出的错误经 `redactError` 去掉 key。
 - **密钥不进 argv**。和系统凭据库交互的子进程，数据只走 stdin/stdout；可执行文件用绝对路径（Linux 的 `secret-tool` 除外）。
 - **文件头进 AAD**，每次写入换新 IV；`parseEnvelope` 在派生密钥之前就拒绝不认识的版本或 scrypt 参数（防止篡改文件触发昂贵计算）。改格式就升 `VAULT_VERSION`。
 - **写入是原子的**：同目录临时文件 + rename，POSIX 下目录 `0700`、文件 `0600`。`VaultStore` 和 `ProviderConfigStore` 的写操作均经内部队列串行执行。
 - **多个进程可能同时打开同一个 vault**，例如运行中的内核和 `albireo keys`。`updateProvider` 先重新读取并解密磁盘上的文件，在它的基础上修改，不会丢掉另一个进程写入的内容。`initialize` 在磁盘上已有 vault 时拒绝执行，不会覆盖它，也不会覆盖它的主密钥。文件被换成另一个 vault（salt 不同）时，写入直接报错。没有跨进程锁：两个进程在同一毫秒级窗口里写入时，仍可能丢失其中一次。只读的内存副本不会自动刷新。
-- 锁定时把内存中的密钥 `Buffer` 清零。JS 字符串（解密后的 API key）无法清零，这是已知限制。锁定时删除自定义 provider 会先移除配置，并把 vault 条目记入待清理队列；下次 `SecretManager.unlock` 成功后再清除密文（进程重启后队列不保留）。若该 ID 已被重新加入配置，解锁时跳过清理，避免误删新 key。
-- `ProviderConfigStore.snapshot()` / `applySnapshot()` 把“读盘解析”和“提交内存”分开；`SecretManager.reloadProviderConfig()` 先快照，确认当前 provider 仍存在后才提交，并在内容或错误信息真的变化时重新注册并推送 `secrets_changed`，因此可被 `GET /secrets` 反复调用。若当前 provider 被外部删掉，保留旧状态并提示，切换后再刷新会自动补应用。`albireo keys status` 只让该进程读取最新配置，不会让运行中的内核重载。当前活跃 provider 不能通过 `POST /providers` 改配置，需先切换。
+- 锁定时把内存中的密钥 `Buffer` 清零。JS 字符串（解密后的 API key）无法清零，这是已知限制。vault 锁定时 `SecretManager.deleteCustomProvider` 直接拒绝：密文删不掉，日后用同一 ID 重新添加的 provider 就会继承旧 key 和旧 override。解锁时先删 vault 条目再删配置，中途失败也只会留下一个没有 key 的 provider，不会留下没有 provider 的 key。
+- `ProviderConfigStore` 的 `reload(guard)`、`upsert`、`remove` 都在同一个队列段里完成读盘、守卫检查和提交，不会被并发写入夹在中间，用旧内容覆盖新内容。`SecretManager` 传入的守卫保证当前活跃的自定义 provider 不会从内存里消失（否则 registry 会注销它，会话也就刷新不了）。外部删掉当前 provider 时，重载暂缓并提示，期间面板的写入也被拒绝；会话切换 provider 后自动补应用。活跃 provider 的配置修改照常生效：空闲时立即生效，运行中则等本轮结束。`reloadProviderConfig()` 只在定义、错误或暂缓提示真的变化时才通知，因此可被 `GET /secrets` 反复调用。`albireo keys status` 只让该进程读取最新配置，不会让运行中的内核重载。
 
 ## 测试
 

@@ -402,33 +402,35 @@ test("reloadProviderConfig picks up external providers.json edits without spurio
     }
   }));
 
-test("a provider deleted while locked has its vault entry purged on unlock", () =>
+test("deleting a custom provider is refused while the vault is locked, so its key cannot outlive it", () =>
   withDir(async (dir) => {
     const passphrase = "a long enough passphrase";
+    const entry = { api: "openai-completions", baseURL: "https://gw-a.example/v1", defaultModel: "q" };
     const config = await ProviderConfigStore.open({ dir });
-    await config.upsert("ollama", {
-      api: "openai-completions",
-      baseURL: "http://127.0.0.1:11434/v1",
-      defaultModel: "q",
-      auth: "none",
-    });
+    await config.upsert("gw", entry);
     const vault = await VaultStore.open({ dir, protector: null });
     await vault.initialize(passphrase);
-    await vault.updateProvider("ollama", { apiKey: KEY });
-    const registry = createVaultRegistry(vault, {}, config);
-    const manager = new SecretManager({ vault, registry, config });
+    await vault.updateProvider("gw", { apiKey: KEY, baseURL: "https://gw-a.example/override" });
+    const manager = new SecretManager({ vault, registry: createVaultRegistry(vault, {}, config), config });
 
     vault.lock();
-    await manager.deleteCustomProvider("ollama");
-    assert.equal(vault.state, "locked");
-    assert.equal(config.has("ollama"), false);
+    await assert.rejects(manager.deleteCustomProvider("gw"), isVaultError("locked"));
+    assert.equal(config.has("gw"), true);
 
     await manager.unlock({ passphrase });
-    assert.equal(vault.state, "unlocked");
-    assert.equal(vault.read().providers.ollama, undefined);
+    await manager.deleteCustomProvider("gw");
+    assert.equal(config.has("gw"), false);
+    assert.equal(vault.read().providers.gw, undefined);
+
+    // Re-adding the ID starts from scratch: no old key, no old endpoint override.
+    await manager.upsertProviderConfig({ id: "gw", ...entry, baseURL: "https://gw-b.example/v1" });
+    const view = manager.status().providers.gw;
+    assert.equal(view.hasKey, false);
+    assert.equal(view.baseURL, undefined);
+    manager.dispose();
   }));
 
-test("a deferred config reload is applied after switching away from a removed active provider", () =>
+test("a reload that drops the active provider is held back, blocks writes, and applies after switching", () =>
   withDir(async (dir) => {
     const ollama = {
       api: "openai-completions",
@@ -444,6 +446,10 @@ test("a deferred config reload is applied after switching away from a removed ac
     try {
       const session = new Session({ providers: registry, provider: "ollama", tools: builtinTools, cwd });
       const manager = new SecretManager({ vault, registry, config, session });
+      let notifications = 0;
+      manager.onChange(() => {
+        notifications++;
+      });
 
       await writeFile(
         config.file,
@@ -457,11 +463,26 @@ test("a deferred config reload is applied after switching away from a removed ac
       assert.match(blocked.configError, /Active provider "ollama" was removed/);
       assert.deepEqual(blocked.providerOrder, ["anthropic", "openai", "ollama"]);
       assert.equal(registry.has("newgw"), false);
+      // Other panels learn about the warning, but only once.
+      assert.equal(notifications, 1);
+      await manager.reloadProviderConfig();
+      assert.equal(notifications, 1);
 
+      // Writes start from the file on disk, so they would drop the active provider too.
+      await assert.rejects(
+        manager.upsertProviderConfig({ id: "other", ...ollama, baseURL: "https://other.example/v1" }),
+        (err) => err instanceof VaultError && err.code === "invalid" && /Active provider "ollama"/.test(err.message),
+      );
+      assert.equal(registry.has("ollama"), true);
+      session.refreshProvider();
+
+      // Switching away applies the held reload without waiting for another GET /secrets.
+      const applied = new Promise((resolve) => manager.onChange(resolve));
       session.switchProvider("anthropic");
-      const applied = await manager.reloadProviderConfig();
-      assert.equal(applied.configError, undefined);
-      assert.deepEqual(applied.providerOrder, ["anthropic", "openai", "newgw"]);
+      await applied;
+      const status = manager.status();
+      assert.equal(status.configError, undefined);
+      assert.deepEqual(status.providerOrder, ["anthropic", "openai", "newgw"]);
       assert.equal(registry.has("newgw"), true);
       assert.equal(registry.has("ollama"), false);
       session.switchProvider("newgw");
@@ -535,44 +556,115 @@ test("credential detection rejects unknown query names and arbitrary header name
     assert.equal(manager.status().providers.gw.headers["x-client"], "••••");
   }));
 
-test("upsertProviderConfig refuses to change the active provider", () =>
+test("a provider saved while a reload is reading the file is not dropped by that reload", () =>
   withDir(async (dir) => {
     const config = await ProviderConfigStore.open({ dir });
     const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
     const registry = createVaultRegistry(vault, {}, config);
-    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-active-"));
+    const manager = new SecretManager({ vault, registry, config });
+
+    const reloading = manager.reloadProviderConfig();
+    const adding = manager.upsertProviderConfig({
+      id: "gw",
+      api: "openai-completions",
+      baseURL: "https://gw.example/v1",
+      defaultModel: "m",
+      auth: "none",
+    });
+    await Promise.all([reloading, adding]);
+    assert.equal(config.has("gw"), true);
+    assert.equal(registry.has("gw"), true);
+    manager.dispose();
+  }));
+
+test("the active-provider guard is not fooled by IDs that match Object.prototype members", () =>
+  withDir(async (dir) => {
+    const entry = { api: "openai-completions", baseURL: "http://127.0.0.1:11434/v1", defaultModel: "q", auth: "none" };
+    const config = await ProviderConfigStore.open({ dir });
+    await config.upsert("constructor", entry);
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-proto-"));
     try {
-      const session = new Session({ providers: registry, provider: "anthropic", tools: builtinTools, cwd });
+      const session = new Session({ providers: registry, provider: "constructor", tools: builtinTools, cwd });
       const manager = new SecretManager({ vault, registry, config, session });
-      await assert.rejects(
-        manager.upsertProviderConfig({ id: "anthropic", baseURL: "https://proxy.example/v1" }),
-        isVaultError("invalid"),
-      );
+
+      await writeFile(config.file, JSON.stringify({ providers: {} }));
+      const status = await manager.reloadProviderConfig();
+      assert.match(status.configError, /Active provider "constructor" was removed/);
+      assert.equal(registry.has("constructor"), true);
+      session.refreshProvider();
       manager.dispose();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   }));
 
-test("a pending delete does not remove the key of a re-added provider on unlock", () =>
+test("changing the active provider's config applies to the session; upserts report whether they created", () =>
   withDir(async (dir) => {
-    const passphrase = "a long enough passphrase";
-    const entry = {
-      api: "openai-completions",
-      baseURL: "http://127.0.0.1:11434/v1",
-      defaultModel: "q",
-      auth: "none",
-    };
+    const entry = { api: "openai-completions", baseURL: "http://127.0.0.1:11434/v1", auth: "none" };
     const config = await ProviderConfigStore.open({ dir });
-    await config.upsert("ollama", entry);
-    const vault = await VaultStore.open({ dir, protector: null });
-    await vault.initialize(passphrase);
-    await vault.updateProvider("ollama", { apiKey: KEY });
-    const manager = new SecretManager({ vault, registry: createVaultRegistry(vault, {}, config), config });
+    await config.upsert("gw", { ...entry, defaultModel: "m1" });
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-active-"));
+    try {
+      const session = new Session({ providers: registry, provider: "gw", tools: builtinTools, cwd });
+      const manager = new SecretManager({ vault, registry, config, session });
+      assert.equal(session.model, "m1");
 
-    vault.lock();
-    await manager.deleteCustomProvider("ollama");
-    await config.upsert("ollama", entry);
-    await manager.unlock({ passphrase });
-    assert.equal(vault.read().providers.ollama.apiKey, KEY);
+      const replaced = await manager.upsertProviderConfig({ id: "gw", ...entry, defaultModel: "m2" });
+      assert.equal(replaced.created, false);
+      assert.equal(session.model, "m2");
+
+      const added = await manager.upsertProviderConfig({ id: "other", ...entry, defaultModel: "m" });
+      assert.equal(added.created, true);
+      manager.dispose();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }));
+
+test("common metadata headers are accepted; the status view masks every header value but keeps null", () =>
+  withDir(async (dir) => {
+    const store = await ProviderConfigStore.open({ dir });
+    await store.upsert("openrouter", {
+      api: "openai-completions",
+      baseURL: "https://openrouter.example/api/v1",
+      defaultModel: "m",
+      headers: { "HTTP-Referer": "https://app.example", "X-Title": "Albireo", authorization: null },
+      models: [{ id: "m", headers: { "anthropic-beta": "beta-flag" } }],
+    });
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const manager = new SecretManager({ vault, registry: createVaultRegistry(vault, {}, store), config: store });
+    const status = manager.status();
+    const view = status.providers.openrouter;
+    assert.deepEqual(view.headers, { "HTTP-Referer": "••••", "X-Title": "••••", authorization: null });
+    assert.deepEqual(view.models[0].headers, { "anthropic-beta": "••••" });
+    assert.ok(!JSON.stringify(status).includes("beta-flag"));
+    assert.ok(!JSON.stringify(status).includes("app.example"));
+  }));
+
+test("one invalid entry in providers.json does not hide the others", () =>
+  withDir(async (dir) => {
+    const good = { api: "openai-completions", baseURL: "http://127.0.0.1:11434/v1", defaultModel: "q", auth: "none" };
+    await writeFile(
+      path.join(dir, PROVIDERS_FILE),
+      JSON.stringify({ providers: { ollama: good, gw: { ...good, headers: { "X-Secret-Token": "s" } } } }),
+    );
+    const store = await ProviderConfigStore.open({ dir });
+    assert.deepEqual(store.ids(), ["anthropic", "openai", "ollama"]);
+    assert.match(store.error, /Header "X-Secret-Token" is not allowed/);
+    // Writing the file back would drop the invalid entry, so writes still ask for a fix first.
+    await assert.rejects(store.upsert("other", good), isVaultError("corrupt"));
+
+    // An entry that turns invalid on reload keeps its last good version.
+    await writeFile(store.file, JSON.stringify({ providers: { ollama: good } }));
+    await store.reload(() => undefined);
+    assert.equal(store.error, undefined);
+    await writeFile(store.file, JSON.stringify({ providers: { ollama: { ...good, baseURL: "ftp://nope" } } }));
+    const result = await store.reload(() => undefined);
+    assert.equal(result.changed, true);
+    assert.match(store.error, /must start with http/);
+    assert.equal(store.get("ollama").baseURL, good.baseURL);
   }));

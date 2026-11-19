@@ -357,8 +357,15 @@ function buildProviderForm(id) {
   }
   form.onsubmit = (e) => {
     e.preventDefault();
-    const patch = { baseURL: baseField.input.value.trim(), model: modelField.input.value.trim() };
+    // Only send overrides the user edited, so saving a key never rewrites them.
+    const patch = form.dataset.dirty
+      ? { baseURL: baseField.input.value.trim(), model: modelField.input.value.trim() }
+      : {};
     if (keyField.input.value.trim()) patch.apiKey = keyField.input.value.trim();
+    if (Object.keys(patch).length === 0) {
+      keysMsg("Nothing to save.");
+      return;
+    }
     saveProvider(id, patch);
   };
   clear.onclick = () => saveProvider(id, { clearApiKey: true });
@@ -383,7 +390,7 @@ function buildProviderForm(id) {
   return entry;
 }
 
-function renderProviderForm(id, view, formsUsable) {
+function renderProviderForm(id, view, formsUsable, vaultLocked) {
   let f = forms.get(id);
   if (!f) f = buildProviderForm(id);
   f.title.textContent = view.name === id ? id : `${view.name} (${id})`;
@@ -398,8 +405,12 @@ function renderProviderForm(id, view, formsUsable) {
 
   f.del.hidden = view.builtin;
   const isActive = id === currentProvider;
-  f.del.disabled = isActive;
-  f.del.title = isActive ? "Switch to another provider before deleting" : `Delete custom provider ${id}`;
+  f.del.disabled = isActive || vaultLocked;
+  f.del.title = isActive
+    ? "Switch to another provider before deleting"
+    : vaultLocked
+      ? "Unlock the vault before deleting, so the stored key is deleted too"
+      : `Delete custom provider ${id}`;
 
   f.fields.hidden = !formsUsable;
   const noAuth = view.auth === "none";
@@ -481,7 +492,7 @@ function renderKeys() {
   for (const id of order) {
     const view = s.providers[id];
     if (!view) continue;
-    const formEl = renderProviderForm(id, view, formsUsable);
+    const formEl = renderProviderForm(id, view, formsUsable, s.state === "locked");
     if (formEl.parentElement !== container) container.appendChild(formEl);
   }
   syncCustomProviderFields();
@@ -561,12 +572,13 @@ $("custom-provider-form").onsubmit = async (e) => {
     compat,
   };
   const initialKey = $("cp-key").value.trim();
-  const isNew = !secrets?.providers?.[id];
   keysMsg("Saving custom provider…");
+  // Set from the server's answer, not from local state that may be stale or not loaded yet.
   let created = false;
   try {
-    secrets = await api("/providers", payload);
-    created = true;
+    const saved = await api("/providers", payload);
+    secrets = saved;
+    created = saved.created === true;
     if (auth !== "none" && initialKey) {
       secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
     }
@@ -576,8 +588,8 @@ $("custom-provider-form").onsubmit = async (e) => {
     renderKeys();
     keysMsg(`Saved custom provider "${id}".`);
   } catch (err) {
-    // Only roll back a new provider; an upsert may have replaced settings we must preserve.
-    if (created && isNew) {
+    // Only roll back a provider this request created; replacing an existing one keeps it.
+    if (created) {
       try {
         secrets = await api(`/providers/${encodeURIComponent(id)}`, undefined, "DELETE");
       } catch {

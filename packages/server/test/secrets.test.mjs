@@ -253,6 +253,7 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
     assert.equal(created.status, 200);
     assert.equal(created.headers["cache-control"], "no-store");
     const status = JSON.parse(created.text);
+    assert.equal(status.created, true);
     assert.deepEqual(status.providerOrder, ["anthropic", "openai", "ollama"]);
     assert.equal(status.providers.ollama.configured, true);
     assert.equal(status.providers.ollama.builtin, false);

@@ -264,7 +264,7 @@ export class VaultStore {
       const key = this.key as Buffer;
       const kdf = this.kdf as KdfParams;
       const current = await this.latest(key, kdf);
-      if (!(id in current.providers)) return;
+      if (!Object.hasOwn(current.providers, id)) return;
       const providers = { ...current.providers };
       delete providers[id];
       const next: VaultSecrets = { providers, updatedAt: Date.now() };

@@ -32,14 +32,14 @@ node packages/cli/dist/cli.js --help       # 全部参数
     "ollama": {
       "api": "openai-completions",
       "baseURL": "http://127.0.0.1:11434/v1",
-      "defaultModel": "qwen2.5-coder:14b",
+      "defaultModel": "<model-id>",
       "auth": "none"
     }
   }
 }
 ```
 
-`providers.json` 只放非敏感配置；API key / bearer token 一律通过面板或 `albireo keys set <provider>` 存进加密 vault。字段、兼容开关和模型覆写的完整列表以 `packages/vault/src/providers.ts` 的校验逻辑为准。外部修改这个文件后，**面板刷新**会让运行中的内核重新读取（`albireo keys status` 只读取自己的进程，不会让已有内核重载）。删除或修改当前正在使用的 provider 配置时，需要先用面板切走；通过面板改 key / base URL / model 覆写则在空闲时自动生效。
+`providers.json` 只放非敏感配置；API key / bearer token 一律通过面板或 `albireo keys set <provider>` 存进加密 vault。字段、兼容开关和模型覆写的完整列表以 `packages/vault/src/providers.ts` 的校验逻辑为准。外部修改这个文件后，**面板刷新**会让运行中的内核重新读取（`albireo keys status` 只读取自己的进程，不会让已有内核重载）。删除当前正在使用的 provider 需要先在面板切走；修改它的配置或 key / base URL / model 覆写都会在空闲时自动生效。口令模式下要先解锁 vault 才能删除自定义 provider，这样它存的 key 会一起删掉。
 
 面板服务只监听本机回环地址，每次启动都会生成新的访问 token。需要写文件或执行命令的工具调用默认要在面板里批准。
 

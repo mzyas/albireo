@@ -51,8 +51,27 @@ export interface ProvidersFile {
   providers: Record<string, ProviderConfigEntry>;
 }
 
-/** Parsed configuration before it is committed to memory, so callers can validate guards first. */
-export interface ProviderConfigSnapshot {
+/**
+ * Checked against the entries a reload or write is about to commit, inside the same queued section
+ * as the read and the commit. Returns a reason to refuse, or undefined to go ahead.
+ */
+export type ProviderConfigGuard = (next: Readonly<Record<string, ProviderConfigEntry>>) => string | undefined;
+
+export interface ProviderConfigReload {
+  /** Whether definitions or the parse error changed. */
+  changed: boolean;
+  /** The guard's reason when the file was read but not applied; it stays on disk for a later reload. */
+  held?: string;
+}
+
+export interface ProviderConfigUpsertResult {
+  definition: ResolvedProviderDefinition;
+  /** False when the entry already existed in `providers.json` and was replaced. */
+  created: boolean;
+}
+
+/** Parsed file before it is committed to memory. */
+interface Snapshot {
   entries: Record<string, ProviderConfigEntry>;
   problem?: string;
 }
@@ -177,19 +196,19 @@ export class ProviderConfigStore {
     return resolveDefinitions(this.entries);
   }
 
-  /** Read `providers.json` without committing it, so a caller can check guards before applying it. */
-  snapshot(): Promise<ProviderConfigSnapshot> {
-    return this.exclusive(() => this.readSnapshot());
-  }
-
-  /** Commit a snapshot read earlier. Returns whether definitions or the parse error changed. */
-  applySnapshot(snapshot: ProviderConfigSnapshot): Promise<boolean> {
-    return this.exclusive(async () => this.commitSnapshot(snapshot));
-  }
-
-  /** Read and commit `providers.json` in one step. */
-  reload(): Promise<boolean> {
-    return this.exclusive(async () => this.commitSnapshot(await this.readSnapshot()));
+  /**
+   * Re-read `providers.json` and commit it unless `guard` refuses. Read, check and commit happen in
+   * one queued section, so a write queued meanwhile can't be overwritten by an older read. A live
+   * kernel should go through `SecretManager.reloadProviderConfig()`, which passes the guard that
+   * keeps the active provider registered.
+   */
+  reload(guard: ProviderConfigGuard): Promise<ProviderConfigReload> {
+    return this.exclusive(async () => {
+      const snapshot = await this.readSnapshot();
+      const held = guard(snapshot.entries);
+      if (held) return { changed: false, held };
+      return { changed: this.commitSnapshot(snapshot) };
+    });
   }
 
   ids(): ProviderId[] {
@@ -205,37 +224,45 @@ export class ProviderConfigStore {
   }
 
   rawEntry(id: ProviderId): ProviderConfigEntry | undefined {
-    const entry = this.entries[id];
-    return entry ? structuredClone(entry) : undefined;
+    return Object.hasOwn(this.entries, id) ? structuredClone(this.entries[id]) : undefined;
   }
 
-  /** Validate and save a provider entry (custom provider or built-in override). */
-  upsert(id: ProviderId, entry: ProviderConfigEntry): Promise<ResolvedProviderDefinition> {
+  /**
+   * Validate and save a provider entry (custom provider or built-in override). The write starts
+   * from the file on disk, so `guard` sees exactly what will be committed and can refuse it.
+   */
+  upsert(id: ProviderId, entry: ProviderConfigEntry, guard?: ProviderConfigGuard): Promise<ProviderConfigUpsertResult> {
     return this.exclusive(async () => {
       const clean = validateProviderEntry(id, entry);
       const current = await this.readForWrite();
+      const created = !Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current, [id]: clean };
+      this.check(guard, next);
       await this.persist(next);
       this.entries = next;
       this.problem = undefined;
-      return resolveOne(id, clean);
+      return { definition: resolveOne(id, clean), created };
     });
   }
 
-  /** Remove an entry from `providers.json`. Returns true if the entry existed. */
-  remove(id: ProviderId): Promise<boolean> {
+  /**
+   * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Either way
+   * the in-memory entries then match the file.
+   */
+  remove(id: ProviderId, guard?: ProviderConfigGuard): Promise<boolean> {
     return this.exclusive(async () => {
       if (!isValidProviderId(id)) {
         throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
       }
       const current = await this.readForWrite();
-      if (!(id in current)) return false;
+      const existed = Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current };
       delete next[id];
-      await this.persist(next);
+      this.check(guard, next);
+      if (existed) await this.persist(next);
       this.entries = next;
       this.problem = undefined;
-      return true;
+      return existed;
     });
   }
 
@@ -247,11 +274,16 @@ export class ProviderConfigStore {
     return run;
   }
 
-  private async loadFromDisk(): Promise<void> {
-    await this.commitSnapshot(await this.readSnapshot());
+  private check(guard: ProviderConfigGuard | undefined, next: Record<string, ProviderConfigEntry>): void {
+    const refusal = guard?.(next);
+    if (refusal) throw new VaultError("invalid", refusal);
   }
 
-  private commitSnapshot(snapshot: ProviderConfigSnapshot): boolean {
+  private async loadFromDisk(): Promise<void> {
+    this.commitSnapshot(await this.readSnapshot());
+  }
+
+  private commitSnapshot(snapshot: Snapshot): boolean {
     const before = JSON.stringify(this.entries);
     const beforeProblem = this.problem;
     this.entries = snapshot.entries;
@@ -260,10 +292,12 @@ export class ProviderConfigStore {
   }
 
   /**
-   * Parse the file without mutating state. On a read/parse failure the last good entries are kept
-   * (a half-written file must not make the running kernel forget its custom providers).
+   * Parse the file without mutating state. On a read failure or a broken file the last good
+   * entries are kept (a half-written file must not make the running kernel forget its custom
+   * providers). A single invalid entry is reported and replaced by its last good version, if any;
+   * the other entries still load.
    */
-  private async readSnapshot(): Promise<ProviderConfigSnapshot> {
+  private async readSnapshot(): Promise<Snapshot> {
     let text: string;
     try {
       text = await readFile(this.file, "utf8");
@@ -272,7 +306,9 @@ export class ProviderConfigStore {
       return { entries: structuredClone(this.entries), problem: `Cannot read ${this.file}.` };
     }
     try {
-      return { entries: parseProvidersFile(text).providers, problem: undefined };
+      const { providers, errors } = parseProviders(text, this.entries);
+      const problem = errors.length > 0 ? `${errors.map((e) => e.message).join(" ")} (${this.file})` : undefined;
+      return { entries: providers, problem };
     } catch (err) {
       const problem = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
       return { entries: structuredClone(this.entries), problem };
@@ -301,7 +337,21 @@ export class ProviderConfigStore {
   }
 }
 
+/** Strict parse: the first invalid entry fails the whole file. Used before writing it back. */
 export function parseProvidersFile(text: string): ProvidersFile {
+  const { providers, errors } = parseProviders(text);
+  if (errors[0]) throw errors[0];
+  return { providers };
+}
+
+/**
+ * Parse the file structure strictly, but collect invalid entries instead of failing on the first.
+ * An invalid entry falls back to `fallback[id]` (its last good version) when there is one.
+ */
+function parseProviders(
+  text: string,
+  fallback: Readonly<Record<string, ProviderConfigEntry>> = {},
+): { providers: Record<string, ProviderConfigEntry>; errors: VaultError[] } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -317,15 +367,22 @@ export function parseProvidersFile(text: string): ProvidersFile {
     }
   }
   const providersRaw = raw.providers;
-  if (providersRaw === undefined) return { providers: {} };
+  if (providersRaw === undefined) return { providers: {}, errors: [] };
   if (!isPlainObject(providersRaw)) {
     throw new VaultError("invalid", `"providers" in ${PROVIDERS_FILE} must be an object.`);
   }
   const providers: Record<string, ProviderConfigEntry> = {};
+  const errors: VaultError[] = [];
   for (const [id, entry] of Object.entries(providersRaw)) {
-    providers[id] = validateProviderEntry(id, entry);
+    try {
+      providers[id] = validateProviderEntry(id, entry);
+    } catch (err) {
+      if (!(err instanceof VaultError)) throw err;
+      errors.push(err);
+      if (Object.hasOwn(fallback, id)) providers[id] = structuredClone(fallback[id] as ProviderConfigEntry);
+    }
   }
-  return { providers };
+  return { providers, errors };
 }
 
 export function validateProviderEntry(id: unknown, raw: unknown): ProviderConfigEntry {
