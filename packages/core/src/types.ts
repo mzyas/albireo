@@ -63,6 +63,15 @@ export interface TurnResult {
   usage: Usage;
 }
 
+/** Supported wire protocols that provider adapters implement. */
+export type WireApi = "anthropic-messages" | "openai-completions";
+
+/** How a provider endpoint authenticates HTTP requests. */
+export type ProviderAuthMode = "api-key" | "bearer" | "none";
+
+/** Extra HTTP headers for provider requests; `null` suppresses an SDK default header. */
+export type ProviderHeaders = Record<string, string | null>;
+
 /** One model turn: stream deltas through `onEvent`, resolve with the full assistant message. */
 export interface Provider {
   readonly id: string;

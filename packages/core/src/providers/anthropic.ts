@@ -1,6 +1,16 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { type HistoryTarget, normalizeHistory, replaysNatively } from "../history.js";
-import type { ContentPart, Message, Provider, StopReason, StreamEvent, TurnRequest, TurnResult } from "../types.js";
+import type {
+  ContentPart,
+  Message,
+  Provider,
+  ProviderAuthMode,
+  ProviderHeaders,
+  StopReason,
+  StreamEvent,
+  TurnRequest,
+  TurnResult,
+} from "../types.js";
 
 type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
@@ -11,59 +21,101 @@ export const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
 /** Pass this explicitly to keep the SDK from reading ANTHROPIC_BASE_URL. */
 export const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
 const MAX_TOOL_ID = 64;
+const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+const NO_AUTH_PLACEHOLDER_KEY = "albireo-none";
+
+/** Compatibility toggles for Anthropic-messages endpoints. */
+export interface AnthropicCompat {
+  /** Include `eager_input_streaming: true` on tool specs. Default: true. */
+  supportsEagerToolInputStreaming?: boolean;
+  /** Send the server-side refusal fallback beta header + `fallbacks: "default"`. Default: true. */
+  supportsFallbacks?: boolean;
+  /** Adaptive thinking + output_config.effort ("adaptive") or omitted ("none"). Default: "adaptive". */
+  thinkingMode?: "adaptive" | "none";
+}
+
+export interface AnthropicModelOverride {
+  maxTokens?: number;
+  headers?: ProviderHeaders;
+  compat?: AnthropicCompat;
+}
 
 export interface AnthropicOptions {
+  /** Provider ID used for registry identity and native payload matching. Default: "anthropic". */
+  id?: string;
   apiKey?: string;
+  /** Bearer token sent as `Authorization: Bearer ...` instead of `x-api-key`. */
+  authToken?: string;
+  /** When `"none"`, suppresses SDK auth headers and never reads environment variables. */
+  auth?: ProviderAuthMode;
   /** Unset: the SDK falls back to ANTHROPIC_BASE_URL, then its built-in default. */
   baseURL?: string;
   model?: string;
-  /** Server-side refusal fallback (beta). On by default; set false to disable. */
+  /** Extra HTTP headers merged onto every request; `null` suppresses a default header. */
+  headers?: ProviderHeaders;
+  compat?: AnthropicCompat;
+  /** Per-model overrides merged on top of provider-level defaults. */
+  modelOverrides?: Record<string, AnthropicModelOverride>;
+  /** Server-side refusal fallback (beta). Shorthand when `compat.supportsFallbacks` is unset. */
   fallbacks?: boolean;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Custom fetch implementation (mainly for tests). */
+  fetch?: typeof globalThis.fetch;
 }
 
 export class AnthropicProvider implements Provider {
-  readonly id = "anthropic";
+  readonly id: string;
   readonly defaultModel: string;
   private client: Anthropic;
+  private compat: AnthropicCompat;
+  private modelOverrides: Record<string, AnthropicModelOverride>;
   private fallbacks: boolean;
   private effort: NonNullable<AnthropicOptions["effort"]>;
 
   constructor(opts: AnthropicOptions = {}) {
+    this.id = opts.id ?? "anthropic";
+    const defaultHeaders: ProviderHeaders | undefined =
+      opts.auth === "none" ? { authorization: null, "x-api-key": null, ...opts.headers } : opts.headers;
+    const authOpts =
+      opts.auth === "none"
+        ? { apiKey: NO_AUTH_PLACEHOLDER_KEY }
+        : opts.authToken
+          ? { authToken: opts.authToken }
+          : opts.apiKey
+            ? { apiKey: opts.apiKey }
+            : {};
     // With no explicit key the SDK resolves ANTHROPIC_API_KEY / auth token / `ant auth login` profile.
     this.client = new Anthropic({
-      ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+      ...authOpts,
       ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
+      ...(defaultHeaders ? { defaultHeaders } : {}),
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
     });
     this.defaultModel = opts.model ?? ANTHROPIC_DEFAULT_MODEL;
+    this.compat = opts.compat ? { ...opts.compat } : {};
+    this.modelOverrides = opts.modelOverrides ? { ...opts.modelOverrides } : {};
     this.fallbacks = opts.fallbacks ?? true;
     this.effort = opts.effort ?? "high";
   }
 
   async runTurn(req: TurnRequest, onEvent: (e: StreamEvent) => void): Promise<TurnResult> {
-    const tools = req.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema as Anthropic.Tool["input_schema"],
-      eager_input_streaming: true,
-    }));
-
-    const betas = ["server-side-fallback-2026-07-01"];
-    const params = {
-      model: req.model,
-      max_tokens: req.maxTokens ?? 64000,
-      system: req.system,
-      messages: toAnthropicMessages(req.messages, req.model),
-      tools,
-      thinking: { type: "adaptive", display: "summarized" },
-      output_config: { effort: this.effort },
-      ...(this.fallbacks ? { betas, fallbacks: "default" } : {}),
-    };
+    const override = this.modelOverrides[req.model];
+    const compat: AnthropicCompat = { ...this.compat, ...override?.compat };
+    const params = buildAnthropicParams(req, {
+      provider: this.id,
+      compat,
+      fallbacks: this.fallbacks,
+      effort: this.effort,
+      maxTokens: req.maxTokens ?? override?.maxTokens,
+    });
 
     // Beta-only fields (fallbacks, thinking display) are cast: the helper types lag the API.
     const stream = this.client.beta.messages.stream(
       params as unknown as Parameters<Anthropic["beta"]["messages"]["stream"]>[0],
-      { signal: req.signal },
+      {
+        signal: req.signal,
+        ...(override?.headers ? { headers: override.headers } : {}),
+      },
     );
 
     for await (const event of stream) {
@@ -84,7 +136,7 @@ export class AnthropicProvider implements Provider {
       message: {
         role: "assistant",
         content,
-        // Thinking blocks must be replayed unchanged on the same model.
+        // Thinking blocks must be replayed unchanged on the same provider, model, and API.
         native: { provider: this.id, model: req.model, api: ANTHROPIC_MESSAGES_API, payload: final.content },
       },
       stopReason: mapStop(final.stop_reason),
@@ -95,6 +147,45 @@ export class AnthropicProvider implements Provider {
       },
     };
   }
+}
+
+export interface BuildAnthropicParamsOptions {
+  provider?: string;
+  compat?: AnthropicCompat;
+  fallbacks?: boolean;
+  effort?: NonNullable<AnthropicOptions["effort"]>;
+  maxTokens?: number;
+}
+
+/** Pure request builder for `anthropic-messages`, exported for unit testing. */
+export function buildAnthropicParams(
+  req: Pick<TurnRequest, "model" | "system" | "messages" | "tools" | "maxTokens">,
+  opts: BuildAnthropicParamsOptions = {},
+): Record<string, unknown> {
+  const compat = opts.compat ?? {};
+  const supportsEager = compat.supportsEagerToolInputStreaming ?? true;
+  const supportsFallbacks = compat.supportsFallbacks ?? opts.fallbacks ?? true;
+  const thinkingMode = compat.thinkingMode ?? "adaptive";
+  const effort = opts.effort ?? "high";
+
+  const tools = req.tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema as Anthropic.Tool["input_schema"],
+    ...(supportsEager ? { eager_input_streaming: true } : {}),
+  }));
+
+  return {
+    model: req.model,
+    max_tokens: opts.maxTokens ?? req.maxTokens ?? 64000,
+    system: req.system,
+    messages: toAnthropicMessages(req.messages, req.model, { provider: opts.provider }),
+    tools,
+    ...(thinkingMode === "adaptive"
+      ? { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort } }
+      : {}),
+    ...(supportsFallbacks ? { betas: [SERVER_SIDE_FALLBACK_BETA], fallbacks: "default" } : {}),
+  };
 }
 
 function mapStop(reason: string | null | undefined): StopReason {
@@ -112,8 +203,12 @@ function mapStop(reason: string | null | undefined): StopReason {
   }
 }
 
-export function toAnthropicMessages(messages: Message[], model: string): BetaMessageParam[] {
-  const target: HistoryTarget = { provider: "anthropic", model, api: ANTHROPIC_MESSAGES_API };
+export function toAnthropicMessages(
+  messages: Message[],
+  model: string,
+  opts: { provider?: string } = {},
+): BetaMessageParam[] {
+  const target: HistoryTarget = { provider: opts.provider ?? "anthropic", model, api: ANTHROPIC_MESSAGES_API };
   return normalizeHistory(messages, target, { maxIdLength: MAX_TOOL_ID }).map((m): BetaMessageParam => {
     if (m.native && replaysNatively(m, target)) {
       return { role: "assistant", content: m.native.payload as BetaContentBlockParam[] };

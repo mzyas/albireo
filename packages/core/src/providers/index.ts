@@ -6,16 +6,25 @@ export {
   ANTHROPIC_DEFAULT_BASE_URL,
   ANTHROPIC_DEFAULT_MODEL,
   ANTHROPIC_MESSAGES_API,
+  type AnthropicCompat,
+  type AnthropicModelOverride,
   type AnthropicOptions,
   AnthropicProvider,
+  type BuildAnthropicParamsOptions,
+  buildAnthropicParams,
   toAnthropicMessages,
 } from "./anthropic.js";
 export {
-  OPENAI_CHAT_API,
+  type BuildOpenAIParamsOptions,
+  buildOpenAIParams,
+  OPENAI_COMPLETIONS_API,
   OPENAI_DEFAULT_BASE_URL,
   OPENAI_DEFAULT_MODEL,
+  type OpenAICompletionsCompat,
+  type OpenAIModelOverride,
   type OpenAIOptions,
   OpenAIProvider,
+  type ToOpenAIMessagesOptions,
   toOpenAIMessages,
 } from "./openai.js";
 export { ScriptedProvider, type ScriptStep } from "./scripted.js";
@@ -29,6 +38,15 @@ export class ProviderRegistry {
     this.factories.set(id, factory);
     this.cache.delete(id);
     return this;
+  }
+
+  unregister(id: string): boolean {
+    this.cache.delete(id);
+    return this.factories.delete(id);
+  }
+
+  has(id: string): boolean {
+    return this.factories.has(id);
   }
 
   ids(): string[] {

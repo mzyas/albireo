@@ -2,6 +2,7 @@ export { type KdfParams, type Protection, SCRYPT_PARAMS, VAULT_VERSION, type Vau
 export { VaultError, type VaultErrorCode } from "./errors.js";
 export { defaultVaultDir } from "./fs.js";
 export {
+  type ProviderConfigUpsert,
   type ProviderSecretView,
   type ProviderUpdate,
   SecretManager,
@@ -17,8 +18,25 @@ export {
   SecretServiceProtector,
 } from "./protector.js";
 export {
+  CUSTOM_ANTHROPIC_COMPAT,
+  DEFAULT_ANTHROPIC_COMPAT,
+  DEFAULT_OPENAI_COMPAT,
+  defaultProviderDefinitions,
+  PROVIDERS_FILE,
+  type ProviderCompat,
+  type ProviderConfigEntry,
+  ProviderConfigStore,
+  type ProviderConfigStoreOptions,
+  type ProviderModelConfig,
+  type ProvidersFile,
+  parseProvidersFile,
+  type ResolvedProviderDefinition,
+  validateProviderEntry,
+} from "./providers.js";
+export {
   createVaultRegistry,
   hasProviderKey,
+  isProviderReady,
   maskApiKey,
   type ProviderFactory,
   type ResolvedProviderConfig,
@@ -27,7 +45,11 @@ export {
   UnconfiguredProvider,
 } from "./registry.js";
 export {
+  BUILTIN_PROVIDER_IDS,
+  type BuiltinProviderId,
+  isBuiltinProviderId,
   isProviderId,
+  isValidProviderId,
   MIN_PASSPHRASE,
   PROVIDER_IDS,
   type ProviderId,

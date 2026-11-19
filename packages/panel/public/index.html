@@ -26,6 +26,7 @@
   select, input, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--err); border-color: var(--line); }
   button:disabled { opacity: .5; cursor: default; }
   main { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 760px; width: 100%; margin: 0 auto; white-space: pre-wrap; word-break: break-word; }
@@ -44,22 +45,29 @@
   footer form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
   footer input { flex: 1; }
   .badge { display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 5px; border-radius: 999px; background: var(--warn); color: var(--panel); font-size: 11px; line-height: 16px; text-align: center; }
-  dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 16px; }
+  dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 16px; }
   dialog::backdrop { background: rgb(0 0 0 / .4); }
   .dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .dlg-head h2 { font-size: 16px; margin: 0; }
   .muted { color: var(--muted); font-size: 13px; }
   .stack { display: grid; gap: 6px; }
   .stack label { font-size: 12px; color: var(--muted); }
-  .stack input { width: 100%; }
+  .stack input:not([type="checkbox"]), .stack select { width: 100%; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+  .check input { width: auto; margin: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .prov { border-top: 1px solid var(--line); padding: 12px 0; }
-  .prov-head { display: flex; align-items: center; gap: 8px; }
+  .prov-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
   .prov-head h3 { font-size: 14px; margin: 0; }
+  .prov-head .spacer { flex: 1; }
   .pill.ok { color: var(--accent); border-color: var(--accent); }
   .actions { display: flex; gap: 8px; margin-top: 4px; }
+  details.prov summary { cursor: pointer; font-size: 14px; font-weight: 600; user-select: none; }
+  details.prov[open] summary { margin-bottom: 10px; }
+  #keys-config-err { margin: 6px 0; font-size: 13px; color: var(--err); }
   #keys-msg { min-height: 1.5em; margin: 8px 0 0; font-size: 13px; }
   #keys-msg.err { color: var(--err); }
-  @media (max-width: 520px) { header .spacer { display: none; } }
+  @media (max-width: 520px) { header .spacer { display: none; } .grid2 { grid-template-columns: 1fr; } }
   /* Last, so it beats the display rules above that share its specificity. */
   [hidden] { display: none; }
 </style>
@@ -71,17 +79,19 @@
   <span class="pill" id="where"></span>
   <span class="spacer"></span>
   <select id="provider" aria-label="Provider"></select>
-  <input id="model" placeholder="model (default)" size="18" aria-label="Model">
+  <input id="model" list="model-options" placeholder="model (default)" size="18" aria-label="Model">
+  <datalist id="model-options"></datalist>
   <button id="switch" type="button">Switch</button>
   <button id="abort" type="button" disabled>Stop</button>
   <button id="keys-open" type="button" hidden>API Keys<span id="keys-badge" class="badge" hidden>!</span></button>
 </header>
 <dialog id="keys" aria-labelledby="keys-title">
   <div class="dlg-head">
-    <h2 id="keys-title">API Keys</h2>
+    <h2 id="keys-title">API Keys &amp; Providers</h2>
     <button id="keys-close" type="button" aria-label="Close">×</button>
   </div>
   <p id="keys-state" class="muted"></p>
+  <p id="keys-config-err" hidden></p>
   <form id="unlock-form" class="stack" hidden>
     <label for="passphrase">Passphrase</label>
     <input id="passphrase" type="password" autocomplete="current-password" required>
@@ -91,7 +101,75 @@
     </div>
     <div class="actions"><button id="unlock-submit" type="submit" class="primary">Unlock</button></div>
   </form>
-  <div id="provider-forms" hidden></div>
+  <div id="provider-forms"></div>
+  <details id="custom-provider-box" class="prov">
+    <summary>Add custom provider</summary>
+    <form id="custom-provider-form" class="stack">
+      <div class="grid2">
+        <div class="stack">
+          <label for="cp-id">Provider ID</label>
+          <input id="cp-id" type="text" placeholder="e.g. deepseek, ollama" pattern="[a-z0-9][a-z0-9._-]{0,63}" autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="stack">
+          <label for="cp-name">Display name (optional)</label>
+          <input id="cp-name" type="text" placeholder="e.g. DeepSeek" autocomplete="off">
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="stack">
+          <label for="cp-api">Wire API</label>
+          <select id="cp-api">
+            <option value="openai-completions">openai-completions</option>
+            <option value="anthropic-messages">anthropic-messages</option>
+          </select>
+        </div>
+        <div class="stack">
+          <label for="cp-auth">Authentication</label>
+          <select id="cp-auth">
+            <option value="api-key">API key (vault)</option>
+            <option value="bearer">Bearer token (vault)</option>
+            <option value="none">None (local endpoint)</option>
+          </select>
+        </div>
+      </div>
+      <label for="cp-base">Base URL</label>
+      <input id="cp-base" type="url" placeholder="https://api.deepseek.com/v1" autocomplete="off" spellcheck="false" required>
+      <div class="grid2">
+        <div class="stack">
+          <label for="cp-model">Default model</label>
+          <input id="cp-model" type="text" placeholder="e.g. deepseek-chat" autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="stack">
+          <label for="cp-models">Extra models (comma-separated)</label>
+          <input id="cp-models" type="text" placeholder="e.g. deepseek-reasoner" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div id="cp-compat-openai" class="stack">
+        <label for="cp-max-tokens">Max tokens parameter</label>
+        <select id="cp-max-tokens">
+          <option value="max_completion_tokens">max_completion_tokens (default)</option>
+          <option value="max_tokens">max_tokens (legacy / DeepSeek / local)</option>
+        </select>
+        <label class="check"><input id="cp-stream-usage" type="checkbox" checked> Request usage in streaming (stream_options)</label>
+        <label class="check"><input id="cp-non-null" type="checkbox"> Send empty string instead of null for tool-only assistant turns</label>
+        <label class="check"><input id="cp-dev-role" type="checkbox"> Send system prompt as developer role</label>
+      </div>
+      <div id="cp-compat-anthropic" class="stack" hidden>
+        <label for="cp-thinking">Thinking mode</label>
+        <select id="cp-thinking">
+          <option value="none">none (compatible default)</option>
+          <option value="adaptive">adaptive</option>
+        </select>
+        <label class="check"><input id="cp-eager" type="checkbox"> Eager tool input streaming (beta)</label>
+        <label class="check"><input id="cp-fallbacks" type="checkbox"> Enable Anthropic fallbacks</label>
+      </div>
+      <div id="cp-key-row" class="stack">
+        <label for="cp-key">API key (optional — saved encrypted in vault)</label>
+        <input id="cp-key" type="password" placeholder="leave blank to set later" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="actions"><button type="submit" class="primary">Save custom provider</button></div>
+    </form>
+  </details>
   <div class="actions"><button id="lock-btn" type="button" hidden>Lock vault</button></div>
   <p id="keys-msg" role="status"></p>
 </dialog>
@@ -145,15 +223,17 @@ function setWhere(provider, model) {
   renderKeys();
 }
 
-// ---- API keys (encrypted vault; the server only ever returns masked hints) ----
-const PROVIDERS = [["anthropic", "Anthropic"], ["openai", "OpenAI (and compatible endpoints)"]];
+// ---- API keys & custom providers (vault + providers.json) ----
 const forms = new Map();
 let secrets = null;
 let currentProvider = null;
 
-async function api(path, body) {
+async function api(path, body, method) {
   const headers = { "x-albireo-token": token };
-  const init = body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+  const resolvedMethod = method ?? (body === undefined ? "GET" : "POST");
+  const init = body === undefined
+    ? { method: resolvedMethod, headers }
+    : { method: resolvedMethod, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
   const res = await fetch(path, init);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `request failed (${res.status})`);
@@ -183,6 +263,8 @@ function describeVault(s) {
 }
 
 function addField(parent, id, label, type) {
+  const wrap = document.createElement("div");
+  wrap.className = "stack";
   const l = document.createElement("label");
   l.htmlFor = id;
   l.textContent = label;
@@ -191,26 +273,72 @@ function addField(parent, id, label, type) {
   input.type = type;
   input.autocomplete = "off";
   input.spellcheck = false;
-  parent.append(l, input);
-  return input;
+  wrap.append(l, input);
+  parent.append(wrap);
+  return { wrap, label: l, input };
 }
 
-function buildProviderForm(id, label) {
+function syncHeaderProviders(s) {
+  if (!s?.enabled || !Array.isArray(s.providerOrder)) return;
+  const sel = $("provider");
+  const prev = sel.value || currentProvider;
+  const nextSelected = s.providerOrder.includes(prev) ? prev : (currentProvider ?? s.providerOrder[0] ?? "");
+  sel.replaceChildren(...s.providerOrder.map((id) => {
+    const view = s.providers[id];
+    const label = view && view.name.toLowerCase() !== id ? `${id} (${view.name})` : id;
+    return new Option(label, id, false, id === nextSelected);
+  }));
+  syncModelSuggestions();
+}
+
+function syncModelSuggestions() {
+  const list = $("model-options");
+  const selected = $("provider").value || currentProvider;
+  const view = secrets?.enabled && selected ? secrets.providers[selected] : null;
+  if (!view) {
+    list.replaceChildren();
+    return;
+  }
+  const ids = new Set();
+  if (view.model) ids.add(view.model);
+  if (view.defaultModel) ids.add(view.defaultModel);
+  for (const m of view.models ?? []) ids.add(m.id);
+  list.replaceChildren(...[...ids].map((m) => {
+    const opt = document.createElement("option");
+    opt.value = m;
+    return opt;
+  }));
+}
+
+function buildProviderForm(id) {
   const form = document.createElement("form");
   form.className = "prov stack";
   const head = document.createElement("div");
   head.className = "prov-head";
   const h = document.createElement("h3");
-  h.textContent = label;
+  const apiBadge = document.createElement("span");
+  apiBadge.className = "pill";
   const badge = document.createElement("span");
   badge.className = "pill";
-  head.append(h, badge);
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "danger";
+  del.textContent = "Delete";
+  head.append(h, apiBadge, badge, spacer, del);
   form.append(head);
-  const key = addField(form, `${id}-key`, "API key", "password");
-  const base = addField(form, `${id}-base`, "Base URL (optional)", "url");
-  const model = addField(form, `${id}-model`, "Default model (optional)", "text");
-  base.placeholder = "provider default";
-  model.placeholder = "provider default";
+
+  const fields = document.createElement("div");
+  fields.className = "stack";
+  const keyField = addField(fields, `prov-${id}-key`, "API key", "password");
+  const baseField = addField(fields, `prov-${id}-base`, "Base URL override (optional)", "url");
+  const modelField = addField(fields, `prov-${id}-model`, "Model override (optional)", "text");
+  const modelList = document.createElement("datalist");
+  modelList.id = `prov-${id}-models`;
+  modelField.input.setAttribute("list", modelList.id);
+  fields.append(modelList);
+
   const row = document.createElement("div");
   row.className = "actions";
   const save = document.createElement("button");
@@ -221,29 +349,93 @@ function buildProviderForm(id, label) {
   clear.type = "button";
   clear.textContent = "Clear key";
   row.append(save, clear);
-  form.append(row);
-  for (const input of [base, model]) input.addEventListener("input", () => { form.dataset.dirty = "1"; });
+  fields.append(row);
+  form.append(fields);
+
+  for (const input of [baseField.input, modelField.input]) {
+    input.addEventListener("input", () => { form.dataset.dirty = "1"; });
+  }
   form.onsubmit = (e) => {
     e.preventDefault();
-    const patch = { baseURL: base.value.trim(), model: model.value.trim() };
-    if (key.value.trim()) patch.apiKey = key.value.trim();
+    const patch = { baseURL: baseField.input.value.trim(), model: modelField.input.value.trim() };
+    if (keyField.input.value.trim()) patch.apiKey = keyField.input.value.trim();
     saveProvider(id, patch);
   };
   clear.onclick = () => saveProvider(id, { clearApiKey: true });
-  forms.set(id, { form, badge, key, base, model, clear });
-  return form;
+  del.onclick = () => deleteProvider(id);
+
+  const entry = {
+    form,
+    title: h,
+    apiBadge,
+    badge,
+    del,
+    fields,
+    keyWrap: keyField.wrap,
+    keyLabel: keyField.label,
+    key: keyField.input,
+    base: baseField.input,
+    model: modelField.input,
+    modelList,
+    clear,
+  };
+  forms.set(id, entry);
+  return entry;
 }
 
-function renderProviderForm(id, view) {
-  const f = forms.get(id);
-  f.badge.textContent = view.hasKey ? "encrypted" : "not configured";
-  f.badge.classList.toggle("ok", view.hasKey);
-  f.key.placeholder = view.hasKey ? `configured (${view.keyHint}) — leave blank to keep` : "paste API key";
-  f.clear.hidden = !view.hasKey;
+function renderProviderForm(id, view, formsUsable) {
+  let f = forms.get(id);
+  if (!f) f = buildProviderForm(id);
+  f.title.textContent = view.name === id ? id : `${view.name} (${id})`;
+  f.apiBadge.textContent = view.api;
+  if (view.auth === "none") {
+    f.badge.textContent = "no key needed";
+    f.badge.classList.add("ok");
+  } else {
+    f.badge.textContent = view.hasKey ? "encrypted" : "not configured";
+    f.badge.classList.toggle("ok", view.hasKey);
+  }
+
+  f.del.hidden = view.builtin;
+  const isActive = id === currentProvider;
+  f.del.disabled = isActive;
+  f.del.title = isActive ? "Switch to another provider before deleting" : `Delete custom provider ${id}`;
+
+  f.fields.hidden = !formsUsable;
+  const noAuth = view.auth === "none";
+  f.keyWrap.hidden = noAuth;
+  f.keyLabel.textContent = view.auth === "bearer" ? "Bearer token" : "API key";
+  f.key.placeholder = view.hasKey
+    ? `configured (${view.keyHint}) — leave blank to keep`
+    : (view.auth === "bearer" ? "paste bearer token" : "paste API key");
+  f.clear.hidden = noAuth || !view.hasKey;
+
+  f.base.placeholder = view.defaultBaseURL;
+  f.model.placeholder = view.defaultModel;
+  const modelIds = new Set([view.defaultModel, ...(view.models ?? []).map((m) => m.id)]);
+  f.modelList.replaceChildren(...[...modelIds].map((m) => {
+    const opt = document.createElement("option");
+    opt.value = m;
+    return opt;
+  }));
+
   if (!f.form.dataset.dirty) {
     f.base.value = view.baseURL ?? "";
     f.model.value = view.model ?? "";
   }
+  return f.form;
+}
+
+function syncCustomProviderFields() {
+  const isAnthropic = $("cp-api").value === "anthropic-messages";
+  $("cp-compat-openai").hidden = isAnthropic;
+  $("cp-compat-anthropic").hidden = !isAnthropic;
+  const formsUsable = Boolean(
+    secrets?.enabled &&
+      (secrets.state === "unlocked" || (secrets.state === "uninitialized" && secrets.protection === "os-keychain")),
+  );
+  const auth = $("cp-auth").value;
+  $("cp-key-row").hidden = auth === "none" || !formsUsable;
 }
 
 function renderKeys() {
@@ -251,23 +443,48 @@ function renderKeys() {
   const s = secrets;
   open.hidden = !s?.enabled;
   if (!s?.enabled) return;
+
+  syncHeaderProviders(s);
+
   const current = currentProvider && s.providers[currentProvider];
-  const attention = s.state !== "unlocked" || (current && !current.hasKey);
+  const needsVault = current?.auth !== "none";
+  const attention = Boolean(s.error || s.configError) || (needsVault && (s.state !== "unlocked" || !current?.configured));
   $("keys-badge").hidden = !attention;
   open.setAttribute("aria-label", attention ? "API Keys (needs attention)" : "API Keys");
-  open.title = attention ? (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)) : "";
+  open.title = attention
+    ? (s.configError ?? (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)))
+    : "";
 
   const formsUsable = s.state === "unlocked" || (s.state === "uninitialized" && s.protection === "os-keychain");
   const creating = s.state === "uninitialized";
   $("keys-state").textContent = describeVault(s);
+  const cfgErr = $("keys-config-err");
+  cfgErr.hidden = !s.configError;
+  cfgErr.textContent = s.configError ? `providers.json: ${s.configError}` : "";
+
   $("unlock-form").hidden = formsUsable || s.protection !== "passphrase";
   $("confirm-row").hidden = !creating;
   $("passphrase").autocomplete = creating ? "new-password" : "current-password";
   $("passphrase2").required = creating;
   $("unlock-submit").textContent = creating ? "Create vault" : "Unlock";
-  $("provider-forms").hidden = !formsUsable;
   $("lock-btn").hidden = !(s.state === "unlocked" && s.protection === "passphrase");
-  for (const [id] of PROVIDERS) renderProviderForm(id, s.providers[id]);
+
+  const order = s.providerOrder ?? Object.keys(s.providers);
+  const keep = new Set(order);
+  for (const [id, entry] of forms) {
+    if (!keep.has(id)) {
+      entry.form.remove();
+      forms.delete(id);
+    }
+  }
+  const container = $("provider-forms");
+  for (const id of order) {
+    const view = s.providers[id];
+    if (!view) continue;
+    const formEl = renderProviderForm(id, view, formsUsable);
+    if (formEl.parentElement !== container) container.appendChild(formEl);
+  }
+  syncCustomProviderFields();
 }
 
 async function saveProvider(id, patch) {
@@ -275,8 +492,10 @@ async function saveProvider(id, patch) {
   try {
     secrets = await api("/secrets/provider", { provider: id, ...patch });
     const f = forms.get(id);
-    f.key.value = "";
-    delete f.form.dataset.dirty;
+    if (f) {
+      f.key.value = "";
+      delete f.form.dataset.dirty;
+    }
     renderKeys();
     keysMsg(secrets.refreshPending ? "Saved. It takes effect when the current turn ends." : "Saved.");
   } catch (err) {
@@ -284,13 +503,80 @@ async function saveProvider(id, patch) {
   }
 }
 
+async function deleteProvider(id) {
+  keysMsg(`Deleting ${id}…`);
+  try {
+    secrets = await api(`/providers/${encodeURIComponent(id)}`, undefined, "DELETE");
+    renderKeys();
+    keysMsg(`Deleted custom provider "${id}".`);
+  } catch (err) {
+    keysMsg(err.message, true);
+  }
+}
+
 function clearSecretInputs() {
   for (const f of forms.values()) f.key.value = "";
+  $("cp-key").value = "";
   $("passphrase").value = "";
   $("passphrase2").value = "";
 }
 
-$("provider-forms").append(...PROVIDERS.map(([id, label]) => buildProviderForm(id, label)));
+$("cp-api").addEventListener("change", syncCustomProviderFields);
+$("cp-auth").addEventListener("change", syncCustomProviderFields);
+$("provider").addEventListener("change", syncModelSuggestions);
+
+$("custom-provider-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const id = $("cp-id").value.trim();
+  const name = $("cp-name").value.trim();
+  const apiType = $("cp-api").value;
+  const auth = $("cp-auth").value;
+  const baseURL = $("cp-base").value.trim();
+  const defaultModel = $("cp-model").value.trim();
+  const extraModels = $("cp-models").value
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  const modelIds = [...new Set([defaultModel, ...extraModels].filter(Boolean))];
+  const compat = apiType === "anthropic-messages"
+    ? {
+        thinkingMode: $("cp-thinking").value,
+        supportsEagerToolInputStreaming: $("cp-eager").checked,
+        supportsFallbacks: $("cp-fallbacks").checked,
+      }
+    : {
+        maxTokensField: $("cp-max-tokens").value,
+        supportsUsageInStreaming: $("cp-stream-usage").checked,
+        requiresNonNullAssistantContent: $("cp-non-null").checked,
+        supportsDeveloperRole: $("cp-dev-role").checked,
+      };
+  const payload = {
+    id,
+    ...(name ? { name } : {}),
+    api: apiType,
+    auth,
+    baseURL,
+    defaultModel,
+    ...(modelIds.length > 0 ? { models: modelIds.map((m) => ({ id: m })) } : {}),
+    compat,
+  };
+  const initialKey = $("cp-key").value.trim();
+  keysMsg("Saving custom provider…");
+  try {
+    secrets = await api("/providers", payload);
+    if (auth !== "none" && initialKey) {
+      secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
+    }
+    $("custom-provider-form").reset();
+    $("cp-key").value = "";
+    $("custom-provider-box").open = false;
+    renderKeys();
+    keysMsg(`Saved custom provider "${id}".`);
+  } catch (err) {
+    keysMsg(err.message, true);
+  }
+};
+
 $("keys-open").onclick = () => { keysMsg(""); renderKeys(); $("keys").showModal(); loadSecrets(); };
 $("keys-close").onclick = () => $("keys").close();
 $("keys").addEventListener("close", clearSecretInputs);
@@ -377,7 +663,7 @@ function handle(ev) {
       card.appendChild(pre); scroll();
       break;
     }
-    case "provider_changed": setWhere(ev.provider, ev.model); $("provider").value = ev.provider; add("notice", `Switched to ${ev.provider} · ${ev.model}`); break;
+    case "provider_changed": setWhere(ev.provider, ev.model); $("provider").value = ev.provider; syncModelSuggestions(); add("notice", `Switched to ${ev.provider} · ${ev.model}`); break;
     case "status": setStatus(ev.state); break;
     case "notice": add("notice", ev.text); break;
     case "error": add("error", ev.message); break;

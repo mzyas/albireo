@@ -203,3 +203,42 @@ test("cancelling a prompt exits with 130 and changes nothing", () =>
     assert.equal(await keys(dir, new MemoryKeyProtector(), ["set", "anthropic"], io), 130);
     assert.deepEqual(await readdir(dir), []);
   }));
+
+test("custom providers from providers.json work with set, clear, and status (including auth: none)", () =>
+  withDir(async (dir) => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      path.join(dir, "providers.json"),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            name: "DeepSeek",
+            api: "openai-completions",
+            baseURL: "https://api.deepseek.com/v1",
+            defaultModel: "deepseek-chat",
+          },
+          ollama: {
+            name: "Ollama",
+            api: "openai-completions",
+            baseURL: "http://127.0.0.1:11434/v1",
+            defaultModel: "qwen2.5-coder:14b",
+            auth: "none",
+          },
+        },
+      }),
+    );
+
+    const protector = new MemoryKeyProtector();
+    const setIo = fakeIO({ stdin: `${KEY}\n` });
+    assert.equal(await keys(dir, protector, ["set", "deepseek", "--model", "deepseek-reasoner"], setIo), 0);
+    assert.match(setIo.out, /Saved\. deepseek\s+key sk-••••WXYZ · model deepseek-reasoner/);
+
+    const statusIo = fakeIO();
+    assert.equal(await keys(dir, protector, ["status"], statusIo), 0);
+    assert.match(statusIo.out, /deepseek\s+key sk-••••WXYZ · model deepseek-reasoner/);
+    assert.match(statusIo.out, /ollama\s+no key needed/);
+
+    const clearIo = fakeIO();
+    assert.equal(await keys(dir, protector, ["clear", "deepseek"], clearIo), 0);
+    assert.match(clearIo.out, /Removed the deepseek key/);
+  }));

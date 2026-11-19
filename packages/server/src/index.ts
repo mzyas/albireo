@@ -72,8 +72,8 @@ async function readJsonObject(req: http.IncomingMessage): Promise<Record<string,
 }
 
 /**
- * Vault routes. Responses carry status and masked hints only, never a key. Called after the
- * Host and token checks, like every other route.
+ * Vault and provider-config routes. Responses carry status and masked hints only, never a key.
+ * Called after the Host and token checks, like every other route.
  */
 async function handleSecrets(
   req: http.IncomingMessage,
@@ -86,7 +86,22 @@ async function handleSecrets(
       replyJson(res, 200, secrets ? secrets.status() : { enabled: false });
       return;
     }
-    if (req.method !== "POST" || !secrets) {
+    if (!secrets) {
+      replyJson(res, 404, { error: "not found" });
+      return;
+    }
+    if (req.method === "DELETE" && pathname.startsWith("/providers/")) {
+      const rawId = pathname.slice("/providers/".length);
+      let id: string;
+      try {
+        id = decodeURIComponent(rawId);
+      } catch {
+        throw new VaultError("invalid", "Invalid provider id.");
+      }
+      replyJson(res, 200, await secrets.deleteCustomProvider(id));
+      return;
+    }
+    if (req.method !== "POST") {
       replyJson(res, 404, { error: "not found" });
       return;
     }
@@ -99,6 +114,9 @@ async function handleSecrets(
         return;
       case "/secrets/lock":
         replyJson(res, 200, await secrets.lock());
+        return;
+      case "/providers":
+        replyJson(res, 200, await secrets.upsertProviderConfig(await readJsonObject(req)));
         return;
       default:
         replyJson(res, 404, { error: "not found" });
@@ -164,7 +182,12 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
         return;
       }
 
-      if (url.pathname === "/secrets" || url.pathname.startsWith("/secrets/")) {
+      if (
+        url.pathname === "/secrets" ||
+        url.pathname.startsWith("/secrets/") ||
+        url.pathname === "/providers" ||
+        url.pathname.startsWith("/providers/")
+      ) {
         await handleSecrets(req, res, url.pathname, opts.secrets);
         return;
       }
