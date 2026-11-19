@@ -12,7 +12,7 @@
   - 服务模式：vault 为空、锁定、缺 key 或 `providers.json` 损坏都照常启动，打印状态，让用户在面板里配置。
   - 无头模式：所选 provider 为 `auth: "none"` 时不要求 vault 解锁或存 key；其余情况在口令模式下于 TTY 提示输入口令（不回显），非 TTY 或缺 key 时直接 `fail()`。
 - `albireo keys` 的约束：
-  - 支持内置与 `providers.json` 中的全部自定义 provider；状态输出按 provider ID 动态对齐，对 `auth: "none"` 显示 `no key needed`。
+  - 支持内置与 `providers.json` 中的全部自定义 provider；状态输出按 provider ID 动态对齐，对 `auth: "none"` 显示 `no key needed`。`keys status` 会先重新读取 `providers.json`，所以能看到其他进程刚加的 provider；它只影响当前 CLI 进程，运行中的内核要等面板刷新才会重载配置。
   - **API key 不从命令行参数读取**：TTY 上不回显提示，否则从管道 stdin 读。多出的位置参数直接报用法错误，错误信息里不回显这个参数（多半是误贴的 key）。
   - 写入走 `SecretManager`，校验和状态视图与面板一致。输出只有 `maskApiKey` 的提示。
   - 口令只能在 TTY 上输入；非 TTY 时在读取 stdin 之前就失败。

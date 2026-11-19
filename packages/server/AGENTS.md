@@ -8,7 +8,7 @@
 - `GET /events`：SSE。先发一条 `{ type: "snapshot", ... }`，之后转发 `Session` 的每个事件。订阅和取快照在同一个 tick 里完成，所以事件不会漏也不会重复。
 - `POST /command`：JSON body，`type` 取 `send | approve | abort | switch`，成功时返回 202。可用命令以源码里的 `switch` 为准。
 - `/secrets`（`GET`）、`/secrets/{unlock,provider,lock}`（`POST`）以及 `/providers`（`POST`）、`/providers/:id`（`DELETE`）：管理加密 vault 与 `providers.json` 自定义 provider，全部交给 `opts.secrets`（`@albireo/vault` 的 `SecretManager`）处理；没传时 `GET /secrets` 返回 `{ enabled: false }`。请求和响应的字段以 `SecretManager` 的类型为准，错误码映射见 `VAULT_STATUS`。
-- vault 或 provider 定义变化不是 Session 事件：server 会向所有 SSE 连接推一条 `{ type: "secrets_changed" }`，面板收到后重新 `GET /secrets`。
+- vault 或 provider 定义变化不是 Session 事件：server 会向所有 SSE 连接推一条 `{ type: "secrets_changed" }`，面板收到后重新 `GET /secrets`。`GET /secrets` 也会先调用 `SecretManager.reloadProviderConfig()`，因此外部进程修改 `providers.json` 后，下次面板刷新即可看到（只有内容真的变化时才广播，不会自激循环）。
 
 ## 安全（这是硬性要求，不是可选项）
 

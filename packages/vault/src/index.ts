@@ -25,6 +25,7 @@ export {
   PROVIDERS_FILE,
   type ProviderCompat,
   type ProviderConfigEntry,
+  type ProviderConfigSnapshot,
   ProviderConfigStore,
   type ProviderConfigStoreOptions,
   type ProviderModelConfig,

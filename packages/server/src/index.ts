@@ -83,6 +83,8 @@ async function handleSecrets(
 ): Promise<void> {
   try {
     if (req.method === "GET" && pathname === "/secrets") {
+      // Pick up providers.json edits made by another process (CLI or a text editor).
+      if (secrets) await secrets.reloadProviderConfig();
       replyJson(res, 200, secrets ? secrets.status() : { enabled: false });
       return;
     }

@@ -561,9 +561,12 @@ $("custom-provider-form").onsubmit = async (e) => {
     compat,
   };
   const initialKey = $("cp-key").value.trim();
+  const isNew = !secrets?.providers?.[id];
   keysMsg("Saving custom provider…");
+  let created = false;
   try {
     secrets = await api("/providers", payload);
+    created = true;
     if (auth !== "none" && initialKey) {
       secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
     }
@@ -573,6 +576,15 @@ $("custom-provider-form").onsubmit = async (e) => {
     renderKeys();
     keysMsg(`Saved custom provider "${id}".`);
   } catch (err) {
+    // Only roll back a new provider; an upsert may have replaced settings we must preserve.
+    if (created && isNew) {
+      try {
+        secrets = await api(`/providers/${encodeURIComponent(id)}`, undefined, "DELETE");
+      } catch {
+        // Keep the original error visible; the provider can be removed manually.
+      }
+      renderKeys();
+    }
     keysMsg(err.message, true);
   }
 };

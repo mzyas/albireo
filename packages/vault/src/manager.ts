@@ -86,6 +86,8 @@ export class SecretManager {
   private session?: Session;
   private offSession?: () => void;
   private pendingRefresh = false;
+  private reloadProblem: string | undefined;
+  private pendingDeletes = new Set<string>();
   private listeners = new Set<() => void>();
 
   constructor(opts: SecretManagerOptions) {
@@ -121,6 +123,7 @@ export class SecretManager {
   status(): SecretsStatus {
     const vault = this.vault;
     const secrets = vault.state === "unlocked" ? vault.read() : null;
+    const configError = this.reloadProblem ?? this.config?.error;
     const definitions = this.definitions();
     const providerOrder: ProviderId[] = [];
     const providers: Record<ProviderId, ProviderSecretView> = {};
@@ -142,7 +145,9 @@ export class SecretManager {
         ...(entry?.baseURL ? { baseURL: entry.baseURL } : {}),
         ...(entry?.model ? { model: entry.model } : {}),
         models: structuredClone(def.models),
-        ...(def.headers ? { headers: { ...def.headers } } : {}),
+        // Names are useful to the panel; values never leave the config store, even if a
+        // hand-edited file smuggled something past validation.
+        ...(def.headers ? { headers: Object.fromEntries(Object.keys(def.headers).map((name) => [name, "••••"])) } : {}),
         compat: { ...def.compat },
       };
     }
@@ -152,7 +157,7 @@ export class SecretManager {
       protection: vault.protection,
       keychain: vault.keychainLabel,
       ...(vault.error ? { error: vault.error } : {}),
-      ...(this.config?.error ? { configError: this.config.error } : {}),
+      ...(configError ? { configError } : {}),
       refreshPending: this.pendingRefresh,
       providerOrder,
       providers,
@@ -165,7 +170,41 @@ export class SecretManager {
     if (typeof passphrase !== "string" || !passphrase) throw new VaultError("invalid", "passphrase is required.");
     if (this.vault.state === "uninitialized") await this.vault.initialize(passphrase);
     else await this.vault.unlock(passphrase);
+    // Providers deleted while the vault was locked left their encrypted entry behind. Purge now
+    // that the key is available; keep failures pending for the next successful unlock.
+    for (const id of [...this.pendingDeletes]) {
+      // The ID may have been re-added (with a new key) since the deletion; don't erase that.
+      if (this.config?.has(id)) {
+        this.pendingDeletes.delete(id);
+        continue;
+      }
+      try {
+        await this.vault.deleteProvider(id);
+        this.pendingDeletes.delete(id);
+      } catch {
+        // Leave it queued; the config entry is already gone, so this is only cleanup.
+      }
+    }
     this.changed();
+    return this.status();
+  }
+
+  /**
+   * Pick up external edits to `providers.json`. The file is parsed into a snapshot first and only
+   * committed after the active-provider guard passes, so the panel and registry never disagree.
+   * A deferred snapshot is still on disk, so the next successful reload applies it.
+   */
+  async reloadProviderConfig(): Promise<SecretsStatus> {
+    if (!this.config) return this.status();
+    const snapshot = await this.config.snapshot();
+    const active = this.session?.providerId;
+    const hasActive = !active || isBuiltinProviderId(active) || active in snapshot.entries;
+    if (!hasActive) {
+      this.reloadProblem = `Active provider "${active}" was removed from providers.json; switch to another provider before applying other changes.`;
+      return this.status();
+    }
+    this.reloadProblem = undefined;
+    if (await this.config.applySnapshot(snapshot)) this.changed();
     return this.status();
   }
 
@@ -205,6 +244,9 @@ export class SecretManager {
         `Invalid provider id: ${String(id)}. Use lowercase letters, digits, '.', '_' or '-'.`,
       );
     }
+    if (this.session?.providerId === id) {
+      throw new VaultError("invalid", `Cannot change configuration of active provider "${id}". Switch first.`);
+    }
     await this.config.upsert(id, entry as ProviderConfigEntry);
     this.changed();
     return this.status();
@@ -230,6 +272,8 @@ export class SecretManager {
     await this.config.remove(id);
     if (this.vault.state === "unlocked") {
       await this.vault.deleteProvider(id);
+    } else if (this.vault.state === "locked") {
+      this.pendingDeletes.add(id);
     }
     this.changed();
     return this.status();

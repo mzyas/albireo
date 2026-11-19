@@ -292,3 +292,32 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
     await s.cleanup();
   }
 });
+
+test("GET /secrets picks up external providers.json edits", async () => {
+  const s = await setup();
+  try {
+    const before = await request(s.base, { pathname: "/secrets", token: s.token });
+    assert.deepEqual(JSON.parse(before.text).providerOrder, ["anthropic", "openai"]);
+
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      s.config.file,
+      JSON.stringify({
+        providers: {
+          ollama: {
+            api: "openai-completions",
+            baseURL: "http://127.0.0.1:11434/v1",
+            defaultModel: "qwen2.5",
+            auth: "none",
+          },
+        },
+      }),
+    );
+
+    const after = await request(s.base, { pathname: "/secrets", token: s.token });
+    assert.equal(after.status, 200);
+    assert.deepEqual(JSON.parse(after.text).providerOrder, ["anthropic", "openai", "ollama"]);
+  } finally {
+    await s.cleanup();
+  }
+});

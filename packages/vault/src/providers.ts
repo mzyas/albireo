@@ -13,6 +13,7 @@ import {
   type ProviderHeaders,
   type WireApi,
 } from "@albireo/core";
+import { assertSafeBaseURLQuery, isAllowedHeader } from "./credentials.js";
 import { VaultError } from "./errors.js";
 import { defaultVaultDir, writeFileAtomic } from "./fs.js";
 import {
@@ -48,6 +49,12 @@ export interface ProviderConfigEntry {
 
 export interface ProvidersFile {
   providers: Record<string, ProviderConfigEntry>;
+}
+
+/** Parsed configuration before it is committed to memory, so callers can validate guards first. */
+export interface ProviderConfigSnapshot {
+  entries: Record<string, ProviderConfigEntry>;
+  problem?: string;
 }
 
 export interface ResolvedProviderDefinition {
@@ -170,6 +177,21 @@ export class ProviderConfigStore {
     return resolveDefinitions(this.entries);
   }
 
+  /** Read `providers.json` without committing it, so a caller can check guards before applying it. */
+  snapshot(): Promise<ProviderConfigSnapshot> {
+    return this.exclusive(() => this.readSnapshot());
+  }
+
+  /** Commit a snapshot read earlier. Returns whether definitions or the parse error changed. */
+  applySnapshot(snapshot: ProviderConfigSnapshot): Promise<boolean> {
+    return this.exclusive(async () => this.commitSnapshot(snapshot));
+  }
+
+  /** Read and commit `providers.json` in one step. */
+  reload(): Promise<boolean> {
+    return this.exclusive(async () => this.commitSnapshot(await this.readSnapshot()));
+  }
+
   ids(): ProviderId[] {
     return this.list().map((p) => p.id);
   }
@@ -226,25 +248,34 @@ export class ProviderConfigStore {
   }
 
   private async loadFromDisk(): Promise<void> {
+    await this.commitSnapshot(await this.readSnapshot());
+  }
+
+  private commitSnapshot(snapshot: ProviderConfigSnapshot): boolean {
+    const before = JSON.stringify(this.entries);
+    const beforeProblem = this.problem;
+    this.entries = snapshot.entries;
+    this.problem = snapshot.problem;
+    return JSON.stringify(this.entries) !== before || this.problem !== beforeProblem;
+  }
+
+  /**
+   * Parse the file without mutating state. On a read/parse failure the last good entries are kept
+   * (a half-written file must not make the running kernel forget its custom providers).
+   */
+  private async readSnapshot(): Promise<ProviderConfigSnapshot> {
     let text: string;
     try {
       text = await readFile(this.file, "utf8");
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        this.entries = {};
-        this.problem = undefined;
-        return;
-      }
-      this.entries = {};
-      this.problem = `Cannot read ${this.file}.`;
-      return;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: {}, problem: undefined };
+      return { entries: structuredClone(this.entries), problem: `Cannot read ${this.file}.` };
     }
     try {
-      this.entries = parseProvidersFile(text).providers;
-      this.problem = undefined;
+      return { entries: parseProvidersFile(text).providers, problem: undefined };
     } catch (err) {
-      this.entries = {};
-      this.problem = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
+      const problem = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
+      return { entries: structuredClone(this.entries), problem };
     }
   }
 
@@ -465,6 +496,7 @@ function validateBaseURL(v: unknown, label: string): string {
   if (url.username || url.password) {
     throw new VaultError("invalid", `${label} must not embed credentials; put keys in the vault.`);
   }
+  assertSafeBaseURLQuery(url, label);
   return trimmed;
 }
 
@@ -478,8 +510,15 @@ function validateHeaders(v: unknown, label: string): ProviderHeaders {
       throw new VaultError("invalid", `Invalid header name "${name}" in ${label}.`);
     }
     if (value === null) {
+      // Null is how a provider suppresses an SDK default header; it carries no credential.
       out[name] = null;
       continue;
+    }
+    if (!isAllowedHeader(name)) {
+      throw new VaultError(
+        "invalid",
+        `Header "${name}" is not allowed in ${label}; only non-credential metadata headers are accepted, keys belong in the vault.`,
+      );
     }
     if (typeof value !== "string" || value.length > 4096 || CONTROL.test(value)) {
       throw new VaultError("invalid", `Invalid header value for "${name}" in ${label}.`);

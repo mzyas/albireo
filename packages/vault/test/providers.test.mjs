@@ -333,3 +333,246 @@ test("SecretManager upserts and deletes custom providers while guarding built-in
       await rm(cwd, { recursive: true, force: true });
     }
   }));
+
+test("providers.json rejects credentials hidden in headers or baseURL query", () =>
+  withDir(async (dir) => {
+    const store = await ProviderConfigStore.open({ dir });
+    const base = {
+      api: "openai-completions",
+      baseURL: "https://api.example.com/v1",
+      defaultModel: "m",
+    };
+    await assert.rejects(
+      store.upsert("gw", { ...base, headers: { Authorization: `Bearer ${KEY}` } }),
+      isVaultError("invalid"),
+    );
+    await assert.rejects(store.upsert("gw", { ...base, headers: { "x-api-key": KEY } }), isVaultError("invalid"));
+    await assert.rejects(
+      store.upsert("gw", { ...base, baseURL: "https://api.example.com/v1?api_key=plaintext" }),
+      isVaultError("invalid"),
+    );
+
+    // Null is still allowed: it suppresses an SDK default header, it doesn't carry a credential.
+    await store.upsert("gw", { ...base, headers: { authorization: null } });
+    assert.equal(store.get("gw").headers.authorization, null);
+  }));
+
+test("reloadProviderConfig picks up external providers.json edits without spurious notifications", () =>
+  withDir(async (dir) => {
+    const config = await ProviderConfigStore.open({ dir });
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-reload-"));
+    try {
+      const session = new Session({ providers: registry, provider: "anthropic", tools: builtinTools, cwd });
+      const manager = new SecretManager({ vault, registry, config, session });
+      let notifications = 0;
+      manager.onChange(() => {
+        notifications++;
+      });
+
+      const first = await manager.reloadProviderConfig();
+      assert.deepEqual(first.providerOrder, ["anthropic", "openai"]);
+      assert.equal(notifications, 0);
+
+      await writeFile(
+        config.file,
+        JSON.stringify({
+          providers: {
+            ollama: {
+              api: "openai-completions",
+              baseURL: "http://127.0.0.1:11434/v1",
+              defaultModel: "q",
+              auth: "none",
+            },
+          },
+        }),
+      );
+      const second = await manager.reloadProviderConfig();
+      assert.deepEqual(second.providerOrder, ["anthropic", "openai", "ollama"]);
+      assert.equal(registry.has("ollama"), true);
+      assert.equal(notifications, 1);
+
+      const third = await manager.reloadProviderConfig();
+      assert.deepEqual(third.providerOrder, second.providerOrder);
+      assert.equal(notifications, 1);
+      manager.dispose();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }));
+
+test("a provider deleted while locked has its vault entry purged on unlock", () =>
+  withDir(async (dir) => {
+    const passphrase = "a long enough passphrase";
+    const config = await ProviderConfigStore.open({ dir });
+    await config.upsert("ollama", {
+      api: "openai-completions",
+      baseURL: "http://127.0.0.1:11434/v1",
+      defaultModel: "q",
+      auth: "none",
+    });
+    const vault = await VaultStore.open({ dir, protector: null });
+    await vault.initialize(passphrase);
+    await vault.updateProvider("ollama", { apiKey: KEY });
+    const registry = createVaultRegistry(vault, {}, config);
+    const manager = new SecretManager({ vault, registry, config });
+
+    vault.lock();
+    await manager.deleteCustomProvider("ollama");
+    assert.equal(vault.state, "locked");
+    assert.equal(config.has("ollama"), false);
+
+    await manager.unlock({ passphrase });
+    assert.equal(vault.state, "unlocked");
+    assert.equal(vault.read().providers.ollama, undefined);
+  }));
+
+test("a deferred config reload is applied after switching away from a removed active provider", () =>
+  withDir(async (dir) => {
+    const ollama = {
+      api: "openai-completions",
+      baseURL: "http://127.0.0.1:11434/v1",
+      defaultModel: "q",
+      auth: "none",
+    };
+    const config = await ProviderConfigStore.open({ dir });
+    await config.upsert("ollama", ollama);
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-deferred-"));
+    try {
+      const session = new Session({ providers: registry, provider: "ollama", tools: builtinTools, cwd });
+      const manager = new SecretManager({ vault, registry, config, session });
+
+      await writeFile(
+        config.file,
+        JSON.stringify({
+          providers: {
+            newgw: { api: "openai-completions", baseURL: "https://gw.example/v1", defaultModel: "m", auth: "none" },
+          },
+        }),
+      );
+      const blocked = await manager.reloadProviderConfig();
+      assert.match(blocked.configError, /Active provider "ollama" was removed/);
+      assert.deepEqual(blocked.providerOrder, ["anthropic", "openai", "ollama"]);
+      assert.equal(registry.has("newgw"), false);
+
+      session.switchProvider("anthropic");
+      const applied = await manager.reloadProviderConfig();
+      assert.equal(applied.configError, undefined);
+      assert.deepEqual(applied.providerOrder, ["anthropic", "openai", "newgw"]);
+      assert.equal(registry.has("newgw"), true);
+      assert.equal(registry.has("ollama"), false);
+      session.switchProvider("newgw");
+      manager.dispose();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }));
+
+test("reload keeps the last good config when the file is briefly corrupt", () =>
+  withDir(async (dir) => {
+    const ollama = {
+      api: "openai-completions",
+      baseURL: "http://127.0.0.1:11434/v1",
+      defaultModel: "q",
+      auth: "none",
+    };
+    const config = await ProviderConfigStore.open({ dir });
+    await config.upsert("ollama", ollama);
+    const goodFile = JSON.stringify({ providers: { ollama: config.rawEntry("ollama") } });
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const manager = new SecretManager({ vault, registry, config });
+    let notifications = 0;
+    manager.onChange(() => {
+      notifications++;
+    });
+
+    await writeFile(config.file, "{ not json");
+    const broken = await manager.reloadProviderConfig();
+    assert.match(broken.configError, /not valid JSON/);
+    assert.deepEqual(broken.providerOrder, ["anthropic", "openai", "ollama"]);
+    assert.equal(registry.has("ollama"), true);
+    assert.equal(notifications, 1);
+
+    await writeFile(config.file, goodFile);
+    const fixed = await manager.reloadProviderConfig();
+    assert.equal(fixed.configError, undefined);
+    assert.equal(notifications, 2);
+    manager.dispose();
+  }));
+
+test("credential detection rejects unknown query names and arbitrary header names", () =>
+  withDir(async (dir) => {
+    const store = await ProviderConfigStore.open({ dir });
+    const base = { api: "openai-completions", baseURL: "https://api.example.com/v1", defaultModel: "m" };
+    for (const name of ["secret_key", "bearer", "x-api-key", "private_token", "ak"]) {
+      await assert.rejects(
+        store.upsert("gw", { ...base, baseURL: `${base.baseURL}?${name}=SECRET` }),
+        isVaultError("invalid"),
+      );
+    }
+    for (const name of ["X-Access-Key", "X-Auth", "X-Session-Key", "X-Custom"]) {
+      await assert.rejects(store.upsert("gw", { ...base, headers: { [name]: "sk-secret" } }), isVaultError("invalid"));
+    }
+
+    const safeURL = `${base.baseURL}?api-version=2026-01-01`;
+    await store.upsert("gw", { ...base, baseURL: safeURL, headers: { "x-client": "albireo" } });
+    assert.equal(store.get("gw").baseURL, safeURL);
+
+    const registry = createVaultRegistry(
+      await VaultStore.open({ dir, protector: new MemoryKeyProtector() }),
+      {},
+      store,
+    );
+    const manager = new SecretManager({
+      vault: await VaultStore.open({ dir, protector: new MemoryKeyProtector() }),
+      registry,
+      config: store,
+    });
+    assert.equal(manager.status().providers.gw.headers["x-client"], "••••");
+  }));
+
+test("upsertProviderConfig refuses to change the active provider", () =>
+  withDir(async (dir) => {
+    const config = await ProviderConfigStore.open({ dir });
+    const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
+    const registry = createVaultRegistry(vault, {}, config);
+    const cwd = await mkdtemp(path.join(tmpdir(), "albireo-active-"));
+    try {
+      const session = new Session({ providers: registry, provider: "anthropic", tools: builtinTools, cwd });
+      const manager = new SecretManager({ vault, registry, config, session });
+      await assert.rejects(
+        manager.upsertProviderConfig({ id: "anthropic", baseURL: "https://proxy.example/v1" }),
+        isVaultError("invalid"),
+      );
+      manager.dispose();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }));
+
+test("a pending delete does not remove the key of a re-added provider on unlock", () =>
+  withDir(async (dir) => {
+    const passphrase = "a long enough passphrase";
+    const entry = {
+      api: "openai-completions",
+      baseURL: "http://127.0.0.1:11434/v1",
+      defaultModel: "q",
+      auth: "none",
+    };
+    const config = await ProviderConfigStore.open({ dir });
+    await config.upsert("ollama", entry);
+    const vault = await VaultStore.open({ dir, protector: null });
+    await vault.initialize(passphrase);
+    await vault.updateProvider("ollama", { apiKey: KEY });
+    const manager = new SecretManager({ vault, registry: createVaultRegistry(vault, {}, config), config });
+
+    vault.lock();
+    await manager.deleteCustomProvider("ollama");
+    await config.upsert("ollama", entry);
+    await manager.unlock({ passphrase });
+    assert.equal(vault.read().providers.ollama.apiKey, KEY);
+  }));

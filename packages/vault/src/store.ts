@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { assertSafeBaseURLQuery } from "./credentials.js";
 import {
   deriveFromMasterKey,
   deriveFromPassphrase,
@@ -414,6 +415,7 @@ function validatePatch(patch: ProviderPatch): ProviderPatch {
       throw new VaultError("invalid", "The base URL must start with http:// or https://.");
     }
     if (url.username || url.password) throw new VaultError("invalid", "Put credentials in the API key, not the URL.");
+    assertSafeBaseURLQuery(url, "The base URL");
   }
   const model = str("model", 200);
   if (p.clearApiKey !== undefined && typeof p.clearApiKey !== "boolean") {
