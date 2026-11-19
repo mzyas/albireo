@@ -1,9 +1,9 @@
 import { parseArgs } from "node:util";
 import {
+  BUILTIN_PROVIDER_IDS,
   createVaultRegistry,
-  isProviderId,
   MIN_PASSPHRASE,
-  PROVIDER_IDS,
+  ProviderConfigStore,
   type ProviderId,
   type ProviderSecretView,
   SecretManager,
@@ -13,13 +13,13 @@ import {
 } from "@albireo/vault";
 import { CancelledError, promptHidden, readStdin } from "./tty.js";
 
-const IDS = PROVIDER_IDS.join(" | ");
+const BUILTIN_IDS = BUILTIN_PROVIDER_IDS.join(" | ");
 
 export const KEYS_HELP = `albireo keys — manage the API keys in the encrypted vault without the panel
 
 Usage:
   albireo keys [status]            show the vault and what is stored per provider
-  albireo keys set <provider>      store the API key for ${IDS}
+  albireo keys set <provider>      store the API key for ${BUILTIN_IDS} or any custom provider in providers.json
       --base-url <url>             custom endpoint ("" goes back to the default)
       --model <id>                 default model ("" goes back to the provider default)
       --keep-key                   leave the key alone; change only --base-url / --model
@@ -63,6 +63,7 @@ export async function runKeysCommand(
   argv: string[],
   io: KeysIO,
   openVault: () => Promise<VaultStore> = () => VaultStore.open(),
+  openConfig: (dir: string) => Promise<ProviderConfigStore> = (dir) => ProviderConfigStore.open({ dir }),
 ): Promise<number> {
   let vault: VaultStore | undefined;
   try {
@@ -82,17 +83,21 @@ export async function runKeysCommand(
     if (command === "status") {
       if (provider !== undefined) throw new UsageError("`status` takes no provider");
       vault = await openVault();
-      return await status(managerFor(vault), io);
+      const config = await openConfig(vault.dir);
+      return await status(managerFor(vault, config), io);
     }
     if (command !== "set" && command !== "clear") throw new UsageError(`unknown command "${command}"`);
-    if (provider === undefined) throw new UsageError(`\`${command}\` needs a provider: ${IDS}`);
-    if (!isProviderId(provider)) throw new UsageError(`unknown provider "${provider}" (expected ${IDS})`);
+    if (provider === undefined) throw new UsageError(`\`${command}\` needs a provider`);
     if (command === "set" && values["keep-key"] && values["base-url"] === undefined && values.model === undefined) {
       throw new UsageError("--keep-key leaves nothing to change without --base-url or --model");
     }
 
     vault = await openVault();
-    const manager = managerFor(vault);
+    const config = await openConfig(vault.dir);
+    if (!config.has(provider)) {
+      throw new UsageError(`unknown provider "${provider}" (expected ${config.ids().join(" | ")})`);
+    }
+    const manager = managerFor(vault, config);
     return command === "set"
       ? await set(manager, io, provider, {
           baseURL: values["base-url"],
@@ -138,8 +143,8 @@ function parseKeysArgs(argv: string[]) {
 }
 
 /** A `SecretManager` without a session: same validation and status view as the panel uses. */
-function managerFor(vault: VaultStore): SecretManager {
-  return new SecretManager({ vault, registry: createVaultRegistry(vault) });
+function managerFor(vault: VaultStore, config: ProviderConfigStore): SecretManager {
+  return new SecretManager({ vault, registry: createVaultRegistry(vault, {}, config), config });
 }
 
 async function status(manager: SecretManager, io: KeysIO): Promise<number> {
@@ -164,13 +169,14 @@ async function set(
     if (!apiKey) throw new Failure("no API key given; nothing was changed");
   }
   const s = await manager.setProvider({ provider, apiKey, baseURL: opts.baseURL, model: opts.model });
-  io.stdout(`Saved. ${providerLine(provider, s.providers[provider])}\n`);
+  const view = s.providers[provider];
+  if (view) io.stdout(`Saved. ${providerLine(provider, view, provider.length)}\n`);
   return 0;
 }
 
 async function clear(manager: SecretManager, io: KeysIO, provider: ProviderId): Promise<number> {
   if (manager.vault.state !== "uninitialized") await prepareWrite(manager, io);
-  if (!manager.status().providers[provider].hasKey) {
+  if (!manager.status().providers[provider]?.hasKey) {
     io.stdout(`No ${provider} key is stored.\n`);
     return 0;
   }
@@ -225,8 +231,13 @@ async function readKey(io: KeysIO, provider: ProviderId): Promise<string> {
 
 function formatStatus(s: SecretsStatus, file: string): string {
   const lines = [`Vault: ${describeVault(s)}`, `File:  ${file}`];
+  if (s.configError) lines.push(`Providers: ${s.configError}`);
   if (s.state === "unlocked") {
-    for (const id of PROVIDER_IDS) lines.push(`  ${providerLine(id, s.providers[id])}`);
+    const width = Math.max(...s.providerOrder.map((id) => id.length), 1);
+    for (const id of s.providerOrder) {
+      const view = s.providers[id];
+      if (view) lines.push(`  ${providerLine(id, view, width)}`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }
@@ -242,11 +253,10 @@ function describeVault(s: SecretsStatus): string {
   return `unlocked, ${holder}`;
 }
 
-const WIDTH = Math.max(...PROVIDER_IDS.map((id) => id.length));
-
-function providerLine(id: ProviderId, p: ProviderSecretView): string {
-  const parts = [p.hasKey ? `key ${p.keyHint}` : "no key"];
+function providerLine(id: ProviderId, p: ProviderSecretView, width: number): string {
+  const keyState = p.hasKey ? `key ${p.keyHint}` : p.auth === "none" ? "no key needed" : "no key";
+  const parts = [keyState];
   if (p.baseURL) parts.push(`base URL ${p.baseURL}`);
   if (p.model) parts.push(`model ${p.model}`);
-  return `${id.padEnd(WIDTH)}  ${parts.join(" · ")}`;
+  return `${id.padEnd(width)}  ${parts.join(" · ")}`;
 }

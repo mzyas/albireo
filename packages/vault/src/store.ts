@@ -16,11 +16,24 @@ import { VaultError } from "./errors.js";
 import { defaultVaultDir, writeFileAtomic } from "./fs.js";
 import { defaultProtector, type KeyProtector } from "./protector.js";
 
-export const PROVIDER_IDS = ["anthropic", "openai"] as const;
-export type ProviderId = (typeof PROVIDER_IDS)[number];
+export const BUILTIN_PROVIDER_IDS = ["anthropic", "openai"] as const;
+export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number];
+/** @deprecated Alias for BUILTIN_PROVIDER_IDS; custom providers can use any valid ProviderId. */
+export const PROVIDER_IDS = BUILTIN_PROVIDER_IDS;
+export type ProviderId = string;
 
-export function isProviderId(v: unknown): v is ProviderId {
-  return typeof v === "string" && (PROVIDER_IDS as readonly string[]).includes(v);
+const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function isBuiltinProviderId(v: unknown): v is BuiltinProviderId {
+  return typeof v === "string" && (BUILTIN_PROVIDER_IDS as readonly string[]).includes(v);
+}
+
+export function isValidProviderId(v: unknown): v is ProviderId {
+  return typeof v === "string" && PROVIDER_ID_PATTERN.test(v);
+}
+
+export function isProviderId(v: unknown): v is BuiltinProviderId {
+  return isBuiltinProviderId(v);
 }
 
 export interface ProviderSecret {
@@ -31,7 +44,7 @@ export interface ProviderSecret {
 
 /** Decrypted payload. Lives only in memory. */
 export interface VaultSecrets {
-  providers: Partial<Record<ProviderId, ProviderSecret>>;
+  providers: Record<string, ProviderSecret>;
   updatedAt: number;
 }
 
@@ -213,7 +226,12 @@ export class VaultStore {
 
   updateProvider(id: ProviderId, patch: ProviderPatch): Promise<void> {
     return this.exclusive(async () => {
-      if (!isProviderId(id)) throw new VaultError("invalid", `Unknown provider: ${String(id)}.`);
+      if (!isValidProviderId(id)) {
+        throw new VaultError(
+          "invalid",
+          `Invalid provider id: ${String(id)}. Use lowercase letters, digits, '.', '_' or '-'.`,
+        );
+      }
       const clean = validatePatch(patch);
       this.requireUnlocked();
       const key = this.key as Buffer;
@@ -232,6 +250,23 @@ export class VaultStore {
       if (Object.keys(entry).length > 0) next.providers[id] = entry;
       else delete next.providers[id];
       // latest() checked that the key is still ours, and nothing awaited since.
+      await this.persist(key, kdf, next);
+      this.secrets = next;
+    });
+  }
+
+  /** Remove all stored fields for one provider. No-op when absent. */
+  deleteProvider(id: ProviderId): Promise<void> {
+    return this.exclusive(async () => {
+      if (!isValidProviderId(id)) throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
+      this.requireUnlocked();
+      const key = this.key as Buffer;
+      const kdf = this.kdf as KdfParams;
+      const current = await this.latest(key, kdf);
+      if (!(id in current.providers)) return;
+      const providers = { ...current.providers };
+      delete providers[id];
+      const next: VaultSecrets = { providers, updatedAt: Date.now() };
       await this.persist(key, kdf, next);
       this.secrets = next;
     });
@@ -342,9 +377,8 @@ function parseSecrets(buf: Buffer): VaultSecrets {
     unknown
   >;
   const out: VaultSecrets = { providers: {}, updatedAt: typeof obj.updatedAt === "number" ? obj.updatedAt : 0 };
-  for (const id of PROVIDER_IDS) {
-    const entry = providers[id];
-    if (typeof entry !== "object" || entry === null) continue;
+  for (const [id, entry] of Object.entries(providers)) {
+    if (!isValidProviderId(id) || typeof entry !== "object" || entry === null) continue;
     const e = entry as Record<string, unknown>;
     const clean: ProviderSecret = {};
     for (const field of ["apiKey", "baseURL", "model"] as const) {

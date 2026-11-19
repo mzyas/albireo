@@ -1,15 +1,37 @@
-import type { ProviderRegistry, Session } from "@albireo/core";
+import type { ProviderAuthMode, ProviderHeaders, ProviderRegistry, Session, WireApi } from "@albireo/core";
 import type { Protection } from "./crypto.js";
 import { VaultError } from "./errors.js";
+import {
+  defaultProviderDefinitions,
+  type ProviderCompat,
+  type ProviderConfigEntry,
+  type ProviderConfigStore,
+  type ProviderModelConfig,
+  type ResolvedProviderDefinition,
+} from "./providers.js";
 import { maskApiKey, type ProviderFactory, registerVaultProviders } from "./registry.js";
-import { isProviderId, PROVIDER_IDS, type ProviderId, type VaultState, type VaultStore } from "./store.js";
+import { isBuiltinProviderId, isValidProviderId, type ProviderId, type VaultState, type VaultStore } from "./store.js";
 
 /** What clients may see about one provider. Never the key itself. */
 export interface ProviderSecretView {
+  id: ProviderId;
+  name: string;
+  api: WireApi;
+  auth: ProviderAuthMode;
+  builtin: boolean;
+  /** True when the provider is ready to make requests (always true for `auth: "none"`). */
+  configured: boolean;
   hasKey: boolean;
   keyHint: string | null;
+  defaultBaseURL: string;
+  defaultModel: string;
+  /** Vault-level baseURL override, if set. */
   baseURL?: string;
+  /** Vault-level model override, if set. */
   model?: string;
+  models: ProviderModelConfig[];
+  headers?: ProviderHeaders;
+  compat: ProviderCompat;
 }
 
 export interface SecretsStatus {
@@ -20,8 +42,12 @@ export interface SecretsStatus {
   keychain: string | null;
   /** Problem that keeps the vault from opening, if any. */
   error?: string;
+  /** Problem reading `providers.json`, if any (built-ins remain available). */
+  configError?: string;
   /** True while a change waits for the running turn to finish before the session picks it up. */
   refreshPending: boolean;
+  /** Ordered list of provider IDs: built-ins first, then custom providers. */
+  providerOrder: ProviderId[];
   providers: Record<ProviderId, ProviderSecretView>;
 }
 
@@ -33,20 +59,28 @@ export interface ProviderUpdate {
   model?: string;
 }
 
+export interface ProviderConfigUpsert extends ProviderConfigEntry {
+  id: ProviderId;
+}
+
 export interface SecretManagerOptions {
   vault: VaultStore;
   registry: ProviderRegistry;
+  /** Non-secret endpoint definitions (`providers.json`). Optional; defaults to built-in providers only. */
+  config?: ProviderConfigStore;
   /** Refreshed after every change, immediately when idle, otherwise once the running turn ends. */
   session?: Session;
   factories?: Partial<Record<ProviderId, ProviderFactory>>;
 }
 
 /**
- * Ties the vault to a live registry and session: every change re-registers the providers and
- * refreshes the session. All inputs are validated here, since they arrive as JSON from the panel.
+ * Ties the vault and provider config store to a live registry and session: every change
+ * re-registers the providers and refreshes the session. All inputs are validated here, since they
+ * arrive as JSON from the panel.
  */
 export class SecretManager {
   readonly vault: VaultStore;
+  readonly config?: ProviderConfigStore;
   private readonly registry: ProviderRegistry;
   private readonly factories: Partial<Record<ProviderId, ProviderFactory>>;
   private session?: Session;
@@ -56,6 +90,7 @@ export class SecretManager {
 
   constructor(opts: SecretManagerOptions) {
     this.vault = opts.vault;
+    this.config = opts.config;
     this.registry = opts.registry;
     this.factories = opts.factories ?? {};
     if (opts.session) this.attach(opts.session);
@@ -86,14 +121,29 @@ export class SecretManager {
   status(): SecretsStatus {
     const vault = this.vault;
     const secrets = vault.state === "unlocked" ? vault.read() : null;
-    const providers = {} as Record<ProviderId, ProviderSecretView>;
-    for (const id of PROVIDER_IDS) {
-      const entry = secrets?.providers[id];
-      providers[id] = {
-        hasKey: Boolean(entry?.apiKey),
+    const definitions = this.definitions();
+    const providerOrder: ProviderId[] = [];
+    const providers: Record<ProviderId, ProviderSecretView> = {};
+    for (const def of definitions) {
+      providerOrder.push(def.id);
+      const entry = secrets?.providers[def.id];
+      const hasKey = Boolean(entry?.apiKey);
+      providers[def.id] = {
+        id: def.id,
+        name: def.name,
+        api: def.api,
+        auth: def.auth,
+        builtin: def.builtin,
+        configured: def.auth === "none" || hasKey,
+        hasKey,
         keyHint: maskApiKey(entry?.apiKey),
+        defaultBaseURL: def.baseURL,
+        defaultModel: def.defaultModel,
         ...(entry?.baseURL ? { baseURL: entry.baseURL } : {}),
         ...(entry?.model ? { model: entry.model } : {}),
+        models: structuredClone(def.models),
+        ...(def.headers ? { headers: { ...def.headers } } : {}),
+        compat: { ...def.compat },
       };
     }
     return {
@@ -102,7 +152,9 @@ export class SecretManager {
       protection: vault.protection,
       keychain: vault.keychainLabel,
       ...(vault.error ? { error: vault.error } : {}),
+      ...(this.config?.error ? { configError: this.config.error } : {}),
       refreshPending: this.pendingRefresh,
+      providerOrder,
       providers,
     };
   }
@@ -117,11 +169,12 @@ export class SecretManager {
     return this.status();
   }
 
-  /** Save one provider's settings. An uninitialized vault is created in os-keychain mode first. */
+  /** Save one provider's credentials/overrides. An uninitialized vault is created in os-keychain mode first. */
   async setProvider(input: ProviderUpdate | Record<string, unknown>): Promise<SecretsStatus> {
     const body: Record<string, unknown> = typeof input === "object" && input !== null ? { ...input } : {};
-    if (!isProviderId(body.provider)) {
-      throw new VaultError("invalid", `provider must be one of: ${PROVIDER_IDS.join(", ")}.`);
+    const ids = this.definitions().map((d) => d.id);
+    if (typeof body.provider !== "string" || !ids.includes(body.provider)) {
+      throw new VaultError("invalid", `provider must be one of: ${ids.join(", ")}.`);
     }
     for (const field of ["apiKey", "baseURL", "model"]) {
       if (body[field] !== undefined && typeof body[field] !== "string") {
@@ -139,6 +192,49 @@ export class SecretManager {
     return this.status();
   }
 
+  /** Add or update a provider endpoint definition in `providers.json`. Never accepts `apiKey`. */
+  async upsertProviderConfig(input: ProviderConfigUpsert | Record<string, unknown>): Promise<SecretsStatus> {
+    if (!this.config) {
+      throw new VaultError("unavailable", "Provider configuration store is not enabled.");
+    }
+    const body: Record<string, unknown> = typeof input === "object" && input !== null ? { ...input } : {};
+    const { id, ...entry } = body;
+    if (!isValidProviderId(id)) {
+      throw new VaultError(
+        "invalid",
+        `Invalid provider id: ${String(id)}. Use lowercase letters, digits, '.', '_' or '-'.`,
+      );
+    }
+    await this.config.upsert(id, entry as ProviderConfigEntry);
+    this.changed();
+    return this.status();
+  }
+
+  /** Remove a custom provider from `providers.json` (and clear its vault entry if unlocked). */
+  async deleteCustomProvider(id: unknown): Promise<SecretsStatus> {
+    if (!this.config) {
+      throw new VaultError("unavailable", "Provider configuration store is not enabled.");
+    }
+    if (!isValidProviderId(id)) {
+      throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
+    }
+    if (isBuiltinProviderId(id)) {
+      throw new VaultError("invalid", `Built-in provider "${id}" cannot be deleted.`);
+    }
+    if (!this.config.has(id)) {
+      throw new VaultError("invalid", `Unknown provider "${id}".`);
+    }
+    if (this.session?.providerId === id) {
+      throw new VaultError("invalid", `Cannot delete active provider "${id}". Switch to another provider first.`);
+    }
+    await this.config.remove(id);
+    if (this.vault.state === "unlocked") {
+      await this.vault.deleteProvider(id);
+    }
+    this.changed();
+    return this.status();
+  }
+
   /** Forget the key in memory. Only for passphrase mode: an os-keychain vault would just reopen itself. */
   async lock(): Promise<SecretsStatus> {
     if (this.vault.protection !== "passphrase") {
@@ -149,8 +245,12 @@ export class SecretManager {
     return this.status();
   }
 
+  private definitions(): ResolvedProviderDefinition[] {
+    return this.config ? this.config.list() : defaultProviderDefinitions();
+  }
+
   private changed(): void {
-    registerVaultProviders(this.registry, this.vault, this.factories);
+    registerVaultProviders(this.registry, this.vault, this.factories, this.config);
     this.refreshSession();
     this.notify();
   }

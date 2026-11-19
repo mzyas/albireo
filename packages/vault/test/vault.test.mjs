@@ -153,17 +153,23 @@ test("updates validate input and serialize", () =>
     await assert.rejects(store.updateProvider("anthropic", { baseURL: "ftp://x" }), isVaultError("invalid"));
     await assert.rejects(store.updateProvider("anthropic", { baseURL: "https://u:p@x" }), isVaultError("invalid"));
     await assert.rejects(store.updateProvider("anthropic", { apiKey: "sk with space" }), isVaultError("invalid"));
-    await assert.rejects(store.updateProvider("other", { apiKey: KEY }), isVaultError("invalid"));
+    await assert.rejects(store.updateProvider("Bad ID", { apiKey: KEY }), isVaultError("invalid"));
+    await assert.rejects(store.updateProvider("../escape", { apiKey: KEY }), isVaultError("invalid"));
 
     await Promise.all([
       store.updateProvider("anthropic", { apiKey: KEY }),
       store.updateProvider("openai", { apiKey: `${KEY}-o` }),
+      store.updateProvider("deepseek", { apiKey: `${KEY}-d` }),
       store.updateProvider("anthropic", { model: "m1" }),
     ]);
     // Reopen from disk: no update was lost to a concurrent write.
     const read = (await VaultStore.open({ dir, protector })).read();
     assert.deepEqual(read.providers.anthropic, { apiKey: KEY, model: "m1" });
     assert.equal(read.providers.openai.apiKey, `${KEY}-o`);
+    assert.equal(read.providers.deepseek.apiKey, `${KEY}-d`);
+
+    await store.deleteProvider("deepseek");
+    assert.equal(store.read().providers.deepseek, undefined);
 
     await store.updateProvider("anthropic", { clearApiKey: true, model: "" });
     assert.equal(store.read().providers.anthropic, undefined);
@@ -254,7 +260,14 @@ test("SecretManager rebuilds providers and refreshes the session, deferring whil
     const status = await manager.setProvider({ provider: "anthropic", apiKey: KEY, model: "claude-custom" });
     assert.equal(status.state, "unlocked");
     assert.equal(status.protection, "os-keychain");
-    assert.deepEqual(status.providers.anthropic, { hasKey: true, keyHint: "sk-••••WXYZ", model: "claude-custom" });
+    assert.deepEqual(status.providerOrder, ["anthropic", "openai"]);
+    assert.equal(status.providers.anthropic.hasKey, true);
+    assert.equal(status.providers.anthropic.configured, true);
+    assert.equal(status.providers.anthropic.keyHint, "sk-••••WXYZ");
+    assert.equal(status.providers.anthropic.model, "claude-custom");
+    assert.equal(status.providers.anthropic.builtin, true);
+    assert.equal(status.providers.anthropic.api, "anthropic-messages");
+    assert.equal(status.providers.anthropic.auth, "api-key");
     assert.ok(!JSON.stringify(status).includes(KEY));
     assert.equal(session.model, "claude-custom");
     assert.equal(changes, 1);
