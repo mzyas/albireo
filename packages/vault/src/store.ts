@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { parseBaseURL } from "./credentials.js";
 import {
   deriveFromMasterKey,
   deriveFromPassphrase,
@@ -151,6 +152,17 @@ export class VaultStore {
     return structuredClone(this.requireUnlocked());
   }
 
+  /** Whether `vault.enc.json` exists on disk right now. */
+  async existsOnDisk(): Promise<boolean> {
+    try {
+      await stat(this.file);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new VaultError("unavailable", `Cannot check ${this.file}.`);
+    }
+  }
+
   /**
    * Create the vault. With a passphrase it uses passphrase mode; without, a random master key goes
    * into the OS credential store (os-keychain mode).
@@ -263,7 +275,7 @@ export class VaultStore {
       const key = this.key as Buffer;
       const kdf = this.kdf as KdfParams;
       const current = await this.latest(key, kdf);
-      if (!(id in current.providers)) return;
+      if (!Object.hasOwn(current.providers, id)) return;
       const providers = { ...current.providers };
       delete providers[id];
       const next: VaultSecrets = { providers, updatedAt: Date.now() };
@@ -403,18 +415,8 @@ function validatePatch(patch: ProviderPatch): ProviderPatch {
   const apiKey = str("apiKey", 4096);
   if (apiKey && /\s/.test(apiKey)) throw new VaultError("invalid", "The API key must not contain whitespace.");
   const baseURL = str("baseURL", 2048);
-  if (baseURL) {
-    let url: URL;
-    try {
-      url = new URL(baseURL);
-    } catch {
-      throw new VaultError("invalid", "The base URL is not a valid URL.");
-    }
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
-      throw new VaultError("invalid", "The base URL must start with http:// or https://.");
-    }
-    if (url.username || url.password) throw new VaultError("invalid", "Put credentials in the API key, not the URL.");
-  }
+  // The wire API isn't known here; `SecretManager.setProvider` checks the URL against it first.
+  if (baseURL) parseBaseURL(baseURL, "The base URL");
   const model = str("model", 200);
   if (p.clearApiKey !== undefined && typeof p.clearApiKey !== "boolean") {
     throw new VaultError("invalid", "clearApiKey must be a boolean.");

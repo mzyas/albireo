@@ -167,7 +167,7 @@
         <label for="cp-key">API key (optional — saved encrypted in vault)</label>
         <input id="cp-key" type="password" placeholder="leave blank to set later" autocomplete="off" spellcheck="false">
       </div>
-      <div class="actions"><button type="submit" class="primary">Save custom provider</button></div>
+      <div class="actions"><button id="cp-submit" type="submit" class="primary">Save custom provider</button></div>
     </form>
   </details>
   <div class="actions"><button id="lock-btn" type="button" hidden>Lock vault</button></div>
@@ -332,7 +332,7 @@ function buildProviderForm(id) {
   const fields = document.createElement("div");
   fields.className = "stack";
   const keyField = addField(fields, `prov-${id}-key`, "API key", "password");
-  const baseField = addField(fields, `prov-${id}-base`, "Base URL override (optional)", "url");
+  const baseField = addField(fields, `prov-${id}-base`, "Base URL override (optional)", "text");
   const modelField = addField(fields, `prov-${id}-model`, "Model override (optional)", "text");
   const modelList = document.createElement("datalist");
   modelList.id = `prov-${id}-models`;
@@ -353,12 +353,23 @@ function buildProviderForm(id) {
   form.append(fields);
 
   for (const input of [baseField.input, modelField.input]) {
-    input.addEventListener("input", () => { form.dataset.dirty = "1"; });
+    input.addEventListener("input", () => {
+      if (input.value === (input.dataset.saved ?? "")) delete input.dataset.dirty;
+      else input.dataset.dirty = "1";
+    });
   }
   form.onsubmit = (e) => {
     e.preventDefault();
-    const patch = { baseURL: baseField.input.value.trim(), model: modelField.input.value.trim() };
+    // Only send overrides the user edited, so saving a key or model never rewrites an untouched
+    // (and possibly masked) base URL.
+    const patch = {};
+    if (baseField.input.dataset.dirty) patch.baseURL = baseField.input.value.trim();
+    if (modelField.input.dataset.dirty) patch.model = modelField.input.value.trim();
     if (keyField.input.value.trim()) patch.apiKey = keyField.input.value.trim();
+    if (Object.keys(patch).length === 0) {
+      keysMsg("Nothing to save.");
+      return;
+    }
     saveProvider(id, patch);
   };
   clear.onclick = () => saveProvider(id, { clearApiKey: true });
@@ -383,23 +394,32 @@ function buildProviderForm(id) {
   return entry;
 }
 
-function renderProviderForm(id, view, formsUsable) {
+function renderProviderForm(id, view, formsUsable, needsUnlock) {
   let f = forms.get(id);
   if (!f) f = buildProviderForm(id);
   f.title.textContent = view.name === id ? id : `${view.name} (${id})`;
   f.apiBadge.textContent = view.api;
-  if (view.auth === "none") {
+  if (view.problem) {
+    // Something other than the key keeps it from working, e.g. a base URL that fails the checks.
+    f.badge.textContent = "unusable";
+    f.badge.classList.remove("ok");
+  } else if (view.auth === "none") {
     f.badge.textContent = "no key needed";
     f.badge.classList.add("ok");
   } else {
     f.badge.textContent = view.hasKey ? "encrypted" : "not configured";
     f.badge.classList.toggle("ok", view.hasKey);
   }
+  f.badge.title = view.problem ?? "";
 
   f.del.hidden = view.builtin;
   const isActive = id === currentProvider;
-  f.del.disabled = isActive;
-  f.del.title = isActive ? "Switch to another provider before deleting" : `Delete custom provider ${id}`;
+  f.del.disabled = isActive || needsUnlock;
+  f.del.title = isActive
+    ? "Switch to another provider before deleting"
+    : needsUnlock
+      ? "Unlock the vault before deleting, so the stored key is deleted too"
+      : `Delete custom provider ${id}`;
 
   f.fields.hidden = !formsUsable;
   const noAuth = view.auth === "none";
@@ -419,10 +439,12 @@ function renderProviderForm(id, view, formsUsable) {
     return opt;
   }));
 
-  if (!f.form.dataset.dirty) {
-    f.base.value = view.baseURL ?? "";
-    f.model.value = view.model ?? "";
-  }
+  const savedBase = view.baseURL ?? "";
+  const savedModel = view.model ?? "";
+  f.base.dataset.saved = savedBase;
+  f.model.dataset.saved = savedModel;
+  if (!f.base.dataset.dirty) f.base.value = savedBase;
+  if (!f.model.dataset.dirty) f.model.value = savedModel;
   return f.form;
 }
 
@@ -436,6 +458,16 @@ function syncCustomProviderFields() {
   );
   const auth = $("cp-auth").value;
   $("cp-key-row").hidden = auth === "none" || !formsUsable;
+  // The server refuses new providers while the vault is locked or can't be opened: a key stored
+  // under the same ID before could not be cleared.
+  const submit = $("cp-submit");
+  const blocked = secrets?.needsUnlock
+    ? "Unlock the vault before adding a provider"
+    : secrets?.error
+      ? "Fix the vault before adding a provider: it can't be opened"
+      : "";
+  submit.disabled = Boolean(blocked);
+  submit.title = blocked;
 }
 
 function renderKeys() {
@@ -448,11 +480,15 @@ function renderKeys() {
 
   const current = currentProvider && s.providers[currentProvider];
   const needsVault = current?.auth !== "none";
-  const attention = Boolean(s.error || s.configError) || (needsVault && (s.state !== "unlocked" || !current?.configured));
+  const attention =
+    Boolean(s.error || s.configError || current?.problem) ||
+    (needsVault && (s.state !== "unlocked" || !current?.configured));
   $("keys-badge").hidden = !attention;
   open.setAttribute("aria-label", attention ? "API Keys (needs attention)" : "API Keys");
   open.title = attention
-    ? (s.configError ?? (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)))
+    ? (s.configError ??
+      current?.problem ??
+      (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)))
     : "";
 
   const formsUsable = s.state === "unlocked" || (s.state === "uninitialized" && s.protection === "os-keychain");
@@ -481,7 +517,7 @@ function renderKeys() {
   for (const id of order) {
     const view = s.providers[id];
     if (!view) continue;
-    const formEl = renderProviderForm(id, view, formsUsable);
+    const formEl = renderProviderForm(id, view, formsUsable, s.needsUnlock === true);
     if (formEl.parentElement !== container) container.appendChild(formEl);
   }
   syncCustomProviderFields();
@@ -494,7 +530,10 @@ async function saveProvider(id, patch) {
     const f = forms.get(id);
     if (f) {
       f.key.value = "";
-      delete f.form.dataset.dirty;
+      // Only a save that sent a field makes it clean; "Clear key", saving another field, or
+      // edits typed while the save was in flight keep unsaved edits.
+      if (patch.baseURL !== undefined && f.base.value.trim() === patch.baseURL) delete f.base.dataset.dirty;
+      if (patch.model !== undefined && f.model.value.trim() === patch.model) delete f.model.dataset.dirty;
     }
     renderKeys();
     keysMsg(secrets.refreshPending ? "Saved. It takes effect when the current turn ends." : "Saved.");
@@ -564,17 +603,25 @@ $("custom-provider-form").onsubmit = async (e) => {
   keysMsg("Saving custom provider…");
   try {
     secrets = await api("/providers", payload);
-    if (auth !== "none" && initialKey) {
-      secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
-    }
-    $("custom-provider-form").reset();
-    $("cp-key").value = "";
-    $("custom-provider-box").open = false;
-    renderKeys();
-    keysMsg(`Saved custom provider "${id}".`);
   } catch (err) {
     keysMsg(err.message, true);
+    return;
   }
+  $("custom-provider-form").reset();
+  $("cp-key").value = "";
+  $("custom-provider-box").open = false;
+  renderKeys();
+  // The provider is saved either way; a key that fails can be entered in its own form.
+  if (auth !== "none" && initialKey) {
+    try {
+      secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
+      renderKeys();
+    } catch (err) {
+      keysMsg(`Saved custom provider "${id}", but not its key: ${err.message}`, true);
+      return;
+    }
+  }
+  keysMsg(`Saved custom provider "${id}".`);
 };
 
 $("keys-open").onclick = () => { keysMsg(""); renderKeys(); $("keys").showModal(); loadSecrets(); };

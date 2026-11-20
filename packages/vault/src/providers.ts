@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ANTHROPIC_DEFAULT_BASE_URL,
   ANTHROPIC_DEFAULT_MODEL,
@@ -13,6 +14,7 @@ import {
   type ProviderHeaders,
   type WireApi,
 } from "@albireo/core";
+import { isCredentialHeader, parseBaseURL } from "./credentials.js";
 import { VaultError } from "./errors.js";
 import { defaultVaultDir, writeFileAtomic } from "./fs.js";
 import {
@@ -24,6 +26,8 @@ import {
 } from "./store.js";
 
 export const PROVIDERS_FILE = "providers.json";
+/** How long a missing `providers.json` gets to reappear before it counts as deleted. */
+const MISSING_FILE_RECHECK_MS = 150;
 
 export type ProviderCompat = AnthropicCompat | OpenAICompletionsCompat;
 
@@ -48,6 +52,24 @@ export interface ProviderConfigEntry {
 
 export interface ProvidersFile {
   providers: Record<string, ProviderConfigEntry>;
+}
+
+/** Something that follows the store's commits, e.g. `SecretManager` for its registry and session. */
+export interface ProviderConfigWatcher {
+  /**
+   * A custom provider in use (the session's active one). It stays defined even if the file drops
+   * it, so it is never unregistered while in use, and `remove` refuses it. Asked at every commit;
+   * a kept entry goes away at the first commit after another provider is named.
+   */
+  keep?(): ProviderId | undefined;
+  /** Called right after every commit that changed something, before anything else can run. */
+  committed?(): void;
+}
+
+/** Parsed file before it is committed to memory. */
+interface Snapshot {
+  entries: Record<string, ProviderConfigEntry>;
+  problem?: string;
 }
 
 export interface ResolvedProviderDefinition {
@@ -136,13 +158,18 @@ export function defaultProviderDefinitions(): ResolvedProviderDefinition[] {
 
 /**
  * Non-secret provider endpoint configuration stored in `providers.json` next to `vault.enc.json`.
- * Never holds API keys or tokens; files containing `apiKey` or `authToken` are rejected.
+ * Never holds API keys or tokens: an entry with `apiKey` or `authToken` is invalid. Loading skips
+ * invalid entries and records `error` (a reload keeps an entry's last good version instead), so
+ * one bad entry doesn't hide the rest; writes require the whole file to be valid.
  */
 export class ProviderConfigStore {
   readonly dir: string;
   readonly file: string;
   private entries: Record<string, ProviderConfigEntry> = {};
   private problem: string | undefined;
+  /** Entries in memory only because a watcher keeps them; the file no longer has them. */
+  private kept = new Set<ProviderId>();
+  private readonly watchers = new Set<ProviderConfigWatcher>();
   private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(opts: ProviderConfigStoreOptions) {
@@ -151,8 +178,9 @@ export class ProviderConfigStore {
   }
 
   /**
-   * Read and validate `providers.json`. Never throws for a missing or invalid file: a missing
-   * file leaves only built-in providers; a broken file records `error` and falls back to built-ins.
+   * Read and validate `providers.json`. Never throws for a missing or invalid file: a missing file
+   * leaves only built-in providers, an invalid entry is skipped while the others load, and a file
+   * that can't be read or isn't valid JSON leaves only built-ins. Both problems go into `error`.
    */
   static async open(opts: ProviderConfigStoreOptions = {}): Promise<ProviderConfigStore> {
     const store = new ProviderConfigStore(opts);
@@ -165,9 +193,29 @@ export class ProviderConfigStore {
     return this.problem;
   }
 
+  /** Custom providers kept defined by a watcher although `providers.json` no longer has them. */
+  get retained(): ReadonlySet<ProviderId> {
+    return this.kept;
+  }
+
+  /** Register a watcher (see `ProviderConfigWatcher`). Returns a function that removes it. */
+  watch(watcher: ProviderConfigWatcher): () => void {
+    this.watchers.add(watcher);
+    return () => this.watchers.delete(watcher);
+  }
+
   /** All resolved providers: built-ins first, then custom providers in file order. */
   list(): ResolvedProviderDefinition[] {
     return resolveDefinitions(this.entries);
+  }
+
+  /**
+   * Re-read `providers.json`. Returns whether the definitions, the error or the retained providers
+   * changed. Read and commit happen in one queued section, so a write queued meanwhile can't be
+   * overwritten by an older read.
+   */
+  reload(): Promise<boolean> {
+    return this.exclusive(async () => this.commit(await this.readSnapshot()));
   }
 
   ids(): ProviderId[] {
@@ -183,37 +231,54 @@ export class ProviderConfigStore {
   }
 
   rawEntry(id: ProviderId): ProviderConfigEntry | undefined {
-    const entry = this.entries[id];
-    return entry ? structuredClone(entry) : undefined;
+    return Object.hasOwn(this.entries, id) ? structuredClone(this.entries[id]) : undefined;
   }
 
-  /** Validate and save a provider entry (custom provider or built-in override). */
-  upsert(id: ProviderId, entry: ProviderConfigEntry): Promise<ResolvedProviderDefinition> {
+  /**
+   * Validate and save a provider entry (custom provider or built-in override). The write starts
+   * from the file on disk, so other entries end up as the file has them. `beforeCreate` runs for
+   * a custom provider the file doesn't have, even if memory still does (removed by hand and not
+   * reloaded yet, or kept only because it is in use): after the file was found writable and
+   * before anything is written; if it throws, nothing is.
+   */
+  upsert(
+    id: ProviderId,
+    entry: ProviderConfigEntry,
+    opts: { beforeCreate?: () => Promise<void> } = {},
+  ): Promise<ResolvedProviderDefinition> {
     return this.exclusive(async () => {
       const clean = validateProviderEntry(id, entry);
-      const current = await this.readForWrite();
+      const { providers: current } = await this.readForWrite();
+      if (!isBuiltinProviderId(id) && !Object.hasOwn(current, id)) await opts.beforeCreate?.();
       const next: Record<string, ProviderConfigEntry> = { ...current, [id]: clean };
       await this.persist(next);
-      this.entries = next;
-      this.problem = undefined;
+      this.commit({ entries: next });
       return resolveOne(id, clean);
     });
   }
 
-  /** Remove an entry from `providers.json`. Returns true if the entry existed. */
+  /**
+   * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Refused for
+   * a provider in use (see `ProviderConfigWatcher.keep`), also when it comes into use while the
+   * file is being written: the file then gets its previous text back (see `putBack`).
+   */
   remove(id: ProviderId): Promise<boolean> {
     return this.exclusive(async () => {
       if (!isValidProviderId(id)) {
         throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
       }
-      const current = await this.readForWrite();
-      if (!(id in current)) return false;
+      if (this.inUse().has(id)) throw inUseError(id);
+      const { text, providers: current } = await this.readForWrite();
+      const existed = Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current };
       delete next[id];
-      await this.persist(next);
-      this.entries = next;
-      this.problem = undefined;
-      return true;
+      if (existed) await this.persist(next);
+      if (this.inUse().has(id)) {
+        if (existed) await this.putBack(text, next);
+        throw inUseError(id);
+      }
+      this.commit({ entries: next });
+      return existed;
     });
   }
 
@@ -226,41 +291,107 @@ export class ProviderConfigStore {
   }
 
   private async loadFromDisk(): Promise<void> {
-    let text: string;
-    try {
-      text = await readFile(this.file, "utf8");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        this.entries = {};
-        this.problem = undefined;
-        return;
+    this.commit(await this.readSnapshot());
+  }
+
+  /**
+   * Make `snapshot` the in-memory state, keeping what is in use, then tell the watchers. All
+   * synchronous and called with nothing awaited after the read or write it follows, so what is in
+   * use is current and nothing can run between the commit and the watchers' updates.
+   */
+  private commit(snapshot: Snapshot): boolean {
+    const entries = { ...snapshot.entries };
+    const kept = new Set<ProviderId>();
+    for (const id of this.inUse()) {
+      if (!Object.hasOwn(entries, id) && Object.hasOwn(this.entries, id)) {
+        entries[id] = this.entries[id] as ProviderConfigEntry;
+        kept.add(id);
       }
-      this.entries = {};
-      this.problem = `Cannot read ${this.file}.`;
-      return;
     }
+    const changed =
+      JSON.stringify(entries) !== JSON.stringify(this.entries) ||
+      snapshot.problem !== this.problem ||
+      !sameMembers(kept, this.kept);
+    this.entries = entries;
+    this.problem = snapshot.problem;
+    this.kept = kept;
+    if (changed) for (const watcher of this.watchers) watcher.committed?.();
+    return changed;
+  }
+
+  /** Custom providers the watchers have in use right now. */
+  private inUse(): Set<ProviderId> {
+    const ids = new Set<ProviderId>();
+    for (const watcher of this.watchers) {
+      const id = watcher.keep?.();
+      if (id && !isBuiltinProviderId(id)) ids.add(id);
+    }
+    return ids;
+  }
+
+  /** The entries that came from the file: memory without the retained ones. Entries are never mutated. */
+  private fileEntries(): Record<string, ProviderConfigEntry> {
+    return Object.fromEntries(Object.entries(this.entries).filter(([id]) => !this.kept.has(id)));
+  }
+
+  private hasFileEntries(): boolean {
+    return Object.keys(this.entries).some((id) => !this.kept.has(id));
+  }
+
+  /** The file's text, or null when it doesn't exist. */
+  private async readText(): Promise<string | null> {
+    const text = await readIfExists(this.file);
+    if (text !== null || !this.hasFileEntries()) return text;
+    // Editors that save by renaming leave the file missing for a moment; look once more before
+    // treating a file that had entries as deleted.
+    await delay(MISSING_FILE_RECHECK_MS);
+    return readIfExists(this.file);
+  }
+
+  /** `error` text for a file that can't be parsed. */
+  private describe(err: unknown): string {
+    return err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
+  }
+
+  /**
+   * Parse the file without mutating state. On a read failure or a broken file the last good
+   * entries are kept (a half-written file must not make the running kernel forget its custom
+   * providers). A single invalid entry is reported and replaced by its last good version, if any;
+   * the other entries still load.
+   */
+  private async readSnapshot(): Promise<Snapshot> {
+    let text: string | null;
     try {
-      this.entries = parseProvidersFile(text).providers;
-      this.problem = undefined;
+      text = await this.readText();
+    } catch {
+      return { entries: this.fileEntries(), problem: `Cannot read ${this.file}.` };
+    }
+    if (text === null) return { entries: {} };
+    try {
+      const { providers, errors } = parseProviders(text, this.fileEntries());
+      const problem = errors.length > 0 ? `${errors.map((e) => e.message).join(" ")} (${this.file})` : undefined;
+      return { entries: providers, problem };
     } catch (err) {
-      this.entries = {};
-      this.problem = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
+      return { entries: this.fileEntries(), problem: this.describe(err) };
     }
   }
 
-  private async readForWrite(): Promise<Record<string, ProviderConfigEntry>> {
-    let text: string;
+  /** The file's text (null when missing) and its entries, parsed strictly so a write can't drop one. */
+  private async readForWrite(): Promise<{ text: string | null; providers: Record<string, ProviderConfigEntry> }> {
+    let text: string | null;
     try {
-      text = await readFile(this.file, "utf8");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+      text = await this.readText();
+    } catch {
       throw new VaultError("corrupt", `Cannot read ${this.file}.`);
     }
+    if (text === null) return { text, providers: {} };
     try {
-      return parseProvidersFile(text).providers;
+      return { text, providers: parseProvidersFile(text).providers };
     } catch (err) {
-      const msg = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
-      throw new VaultError("corrupt", `Fix or remove ${this.file} before saving provider settings: ${msg}`);
+      throw new VaultError(
+        "corrupt",
+        `Fix or remove ${this.file} before saving provider settings: ${this.describe(err)}`,
+      );
     }
   }
 
@@ -268,9 +399,63 @@ export class ProviderConfigStore {
     const file: ProvidersFile = { providers };
     await writeFileAtomic(this.file, `${JSON.stringify(file, null, 2)}\n`);
   }
+
+  /**
+   * Undo a write of `written`: the file gets back exactly the `text` it had, not a re-serialized
+   * copy. If that write fails too, memory follows the file as it now is, so an entry in use stays
+   * only as a kept one (reported by `retained`) instead of a file and memory that disagree.
+   */
+  private async putBack(text: string | null, written: Record<string, ProviderConfigEntry>): Promise<void> {
+    try {
+      if (text !== null) await writeFileAtomic(this.file, text);
+    } catch {
+      this.commit({ entries: written });
+    }
+  }
 }
 
+const TRANSIENT_READ_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** A file's text, or null if it doesn't exist. */
+async function readIfExists(file: string): Promise<string | null> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readFile(file, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return null;
+      if (process.platform === "win32" && attempt < 1 && TRANSIENT_READ_ERRORS.has(code ?? "")) {
+        await delay(MISSING_FILE_RECHECK_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+function inUseError(id: ProviderId): VaultError {
+  return new VaultError("invalid", `Provider "${id}" is in use; switch to another provider before deleting it.`);
+}
+
+function sameMembers<T>(a: ReadonlySet<T>, b: ReadonlySet<T>): boolean {
+  return a.size === b.size && [...a].every((x) => b.has(x));
+}
+
+/** Strict parse: the first invalid entry fails the whole file. Used before writing it back. */
 export function parseProvidersFile(text: string): ProvidersFile {
+  const { providers, errors } = parseProviders(text);
+  if (errors[0]) throw errors[0];
+  return { providers };
+}
+
+/**
+ * Parse the file structure strictly, but collect invalid entries instead of failing on the first.
+ * An invalid entry falls back to `fallback[id]` (its last good version) when there is one.
+ */
+function parseProviders(
+  text: string,
+  fallback: Readonly<Record<string, ProviderConfigEntry>> = {},
+): { providers: Record<string, ProviderConfigEntry>; errors: VaultError[] } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -286,15 +471,22 @@ export function parseProvidersFile(text: string): ProvidersFile {
     }
   }
   const providersRaw = raw.providers;
-  if (providersRaw === undefined) return { providers: {} };
+  if (providersRaw === undefined) return { providers: {}, errors: [] };
   if (!isPlainObject(providersRaw)) {
     throw new VaultError("invalid", `"providers" in ${PROVIDERS_FILE} must be an object.`);
   }
   const providers: Record<string, ProviderConfigEntry> = {};
+  const errors: VaultError[] = [];
   for (const [id, entry] of Object.entries(providersRaw)) {
-    providers[id] = validateProviderEntry(id, entry);
+    try {
+      providers[id] = validateProviderEntry(id, entry);
+    } catch (err) {
+      if (!(err instanceof VaultError)) throw err;
+      errors.push(err);
+      if (Object.hasOwn(fallback, id)) providers[id] = structuredClone(fallback[id] as ProviderConfigEntry);
+    }
   }
-  return { providers };
+  return { providers, errors };
 }
 
 export function validateProviderEntry(id: unknown, raw: unknown): ProviderConfigEntry {
@@ -342,7 +534,7 @@ export function validateProviderEntry(id: unknown, raw: unknown): ProviderConfig
   }
 
   if (raw.baseURL !== undefined) {
-    const baseURL = validateBaseURL(raw.baseURL, `providers.${id}.baseURL`);
+    const baseURL = validateBaseURL(raw.baseURL, `providers.${id}.baseURL`, resolvedApi);
     if (baseURL) out.baseURL = baseURL;
   }
   if (!builtin && !out.baseURL) {
@@ -450,21 +642,9 @@ function validateText(v: unknown, label: string, max: number): string {
   return trimmed;
 }
 
-function validateBaseURL(v: unknown, label: string): string {
+function validateBaseURL(v: unknown, label: string, api: WireApi): string {
   const trimmed = validateText(v, label, 2048);
-  if (!trimmed) return "";
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    throw new VaultError("invalid", `${label} is not a valid URL.`);
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new VaultError("invalid", `${label} must start with http:// or https://.`);
-  }
-  if (url.username || url.password) {
-    throw new VaultError("invalid", `${label} must not embed credentials; put keys in the vault.`);
-  }
+  if (trimmed) parseBaseURL(trimmed, label, api);
   return trimmed;
 }
 
@@ -478,8 +658,15 @@ function validateHeaders(v: unknown, label: string): ProviderHeaders {
       throw new VaultError("invalid", `Invalid header name "${name}" in ${label}.`);
     }
     if (value === null) {
+      // Null is how a provider suppresses an SDK default header; it carries no credential.
       out[name] = null;
       continue;
+    }
+    if (isCredentialHeader(name)) {
+      throw new VaultError(
+        "invalid",
+        `Header "${name}" is not allowed in ${label}: it looks like a credential, and keys belong in the vault.`,
+      );
     }
     if (typeof value !== "string" || value.length > 4096 || CONTROL.test(value)) {
       throw new VaultError("invalid", `Invalid header value for "${name}" in ${label}.`);

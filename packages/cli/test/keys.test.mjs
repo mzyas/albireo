@@ -242,3 +242,82 @@ test("custom providers from providers.json work with set, clear, and status (inc
     assert.equal(await keys(dir, protector, ["clear", "deepseek"], clearIo), 0);
     assert.match(clearIo.out, /Removed the deepseek key/);
   }));
+
+test("rejected provider in providers.json reports config.error in keys set", () =>
+  withDir(async (dir) => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      path.join(dir, "providers.json"),
+      JSON.stringify({
+        providers: {
+          gw: {
+            api: "openai-completions",
+            baseURL: "https://gw.example/v1",
+            defaultModel: "m",
+            headers: { "X-Api-Key": "secret" },
+          },
+        },
+      }),
+    );
+
+    const io = fakeIO({ stdin: KEY });
+    assert.equal(await keys(dir, new MemoryKeyProtector(), ["set", "gw"], io), 2);
+    assert.match(io.err, /unknown provider "gw"/);
+    assert.match(io.err, /Header "X-Api-Key" is not allowed/);
+  }));
+
+test("keys status and keys set report an unusable base-URL override", () =>
+  withDir(async (dir) => {
+    const { writeFile } = await import("node:fs/promises");
+    const providersFile = path.join(dir, "providers.json");
+    await writeFile(
+      providersFile,
+      JSON.stringify({
+        providers: {
+          gw: {
+            api: "openai-completions",
+            baseURL: "https://gw.example/v1",
+            defaultModel: "m",
+          },
+        },
+      }),
+    );
+
+    const protector = new MemoryKeyProtector();
+    assert.equal(
+      await keys(
+        dir,
+        protector,
+        ["set", "gw", "--base-url", "https://gw.example/v1?api-version=1"],
+        fakeIO({ stdin: KEY }),
+      ),
+      0,
+    );
+
+    await writeFile(
+      providersFile,
+      JSON.stringify({
+        providers: {
+          gw: {
+            api: "anthropic-messages",
+            baseURL: "https://gw.example/v1",
+            defaultModel: "m",
+          },
+        },
+      }),
+    );
+
+    const statusIo = fakeIO();
+    assert.equal(await keys(dir, protector, ["status"], statusIo), 0);
+    assert.match(
+      statusIo.out,
+      /gw\s+key sk-••••WXYZ · base URL https:\/\/gw\.example\/v1\?api-version=1 · unusable: .*query string/,
+    );
+
+    const setIo = fakeIO();
+    assert.equal(await keys(dir, protector, ["set", "gw", "--keep-key", "--model", "m2"], setIo), 0);
+    assert.match(
+      setIo.out,
+      /Saved\. gw\s+key sk-••••WXYZ · base URL https:\/\/gw\.example\/v1\?api-version=1 · model m2 · unusable:/,
+    );
+  }));
