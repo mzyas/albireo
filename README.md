@@ -26,8 +26,6 @@ node packages/cli/dist/cli.js --help       # 全部参数
 
 除了内置的 Anthropic / OpenAI，还可以接兼容 Anthropic Messages 或 OpenAI Chat Completions 协议的端点（DeepSeek、OpenRouter、Ollama、LiteLLM、自建网关等）。在面板的 **API Keys** 里添加，或者写进用户配置目录（和加密 vault 同目录）的 `providers.json`，可用字段以 `packages/vault/src/providers.ts` 的校验逻辑为准。这个文件只放非敏感配置，key 一律存进加密 vault。
 
-在面板里做的修改空闲时立即生效；直接改 `providers.json` 后刷新面板即可生效。在终端里用 `keys` 子命令改的密钥，要重启内核才会生效。
-
 面板服务只监听本机回环地址，每次启动都会生成新的访问 token。需要写文件或执行命令的工具调用默认要在面板里批准。
 
 ## 开发

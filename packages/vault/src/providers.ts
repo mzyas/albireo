@@ -414,13 +414,22 @@ export class ProviderConfigStore {
   }
 }
 
+const TRANSIENT_READ_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+
 /** A file's text, or null if it doesn't exist. */
 async function readIfExists(file: string): Promise<string | null> {
-  try {
-    return await readFile(file, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readFile(file, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return null;
+      if (process.platform === "win32" && attempt < 1 && TRANSIENT_READ_ERRORS.has(code ?? "")) {
+        await delay(MISSING_FILE_RECHECK_MS);
+        continue;
+      }
+      throw err;
+    }
   }
 }
 

@@ -138,7 +138,7 @@ export function providerProblem(vault: VaultStore, def: ResolvedProviderDefiniti
   return problemWith(vault, def, vault.state === "unlocked" ? vault.read().providers[def.id] : undefined);
 }
 
-function problemWith(
+export function problemWith(
   vault: VaultStore,
   def: ResolvedProviderDefinition,
   entry: ProviderSecret | undefined,

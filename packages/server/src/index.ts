@@ -85,8 +85,8 @@ async function handleSecrets(
     if (req.method === "GET" && pathname === "/secrets") {
       // Pick up providers.json edits made by another process (CLI or a text editor). A failed
       // reload must not hide the status: the panel needs it to show what is wrong.
-      if (secrets) await secrets.reloadProviderConfig().catch(() => {});
-      replyJson(res, 200, secrets ? secrets.status() : { enabled: false });
+      const status = secrets ? await secrets.reloadProviderConfig().catch(() => secrets.status()) : { enabled: false };
+      replyJson(res, 200, status);
       return;
     }
     if (!secrets) {

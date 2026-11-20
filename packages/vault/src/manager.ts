@@ -10,7 +10,7 @@ import {
   type ProviderModelConfig,
   type ResolvedProviderDefinition,
 } from "./providers.js";
-import { maskApiKey, type ProviderFactory, providerProblem, registerVaultProviders } from "./registry.js";
+import { maskApiKey, type ProviderFactory, problemWith, registerVaultProviders } from "./registry.js";
 import { isBuiltinProviderId, isValidProviderId, type ProviderId, type VaultState, type VaultStore } from "./store.js";
 
 /** What clients may see about one provider. Never the key itself. */
@@ -161,7 +161,7 @@ export class SecretManager {
       providerOrder.push(def.id);
       const entry = secrets?.providers[def.id];
       const hasKey = Boolean(entry?.apiKey);
-      const problem = providerProblem(vault, def);
+      const problem = problemWith(vault, def, entry);
       providers[def.id] = {
         id: def.id,
         name: def.name,
