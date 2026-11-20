@@ -149,7 +149,7 @@ function problemWith(
   if (urlProblem) {
     return {
       cause: "base-url",
-      message: `${def.name} cannot be used: ${urlProblem} Change the base URL under "API Keys" in the panel.`,
+      message: `${def.name} cannot be used: ${urlProblem} Change or clear the base URL under "API Keys" in the panel, or with \`albireo keys set ${def.id} --keep-key --base-url ""\`.`,
     };
   }
   if (def.auth === "none" || entry?.apiKey) return undefined;
@@ -157,7 +157,7 @@ function problemWith(
     ? `The Albireo vault could not be opened, so the ${def.name} API key is unavailable: ${vault.error}`
     : vault.state === "locked"
       ? `The Albireo vault is locked, so the ${def.name} API key is unavailable. Unlock it under "API Keys" in the panel.`
-      : `The ${def.name} API key is not configured in the Albireo vault. Add it under "API Keys" in the panel, or with \`albireo keys set ${def.id}\` and restart.`;
+      : `The ${def.name} API key is not configured in the Albireo vault. Add it under "API Keys" in the panel, or with \`albireo keys set ${def.id}\`.`;
   return { cause: "key", message };
 }
 

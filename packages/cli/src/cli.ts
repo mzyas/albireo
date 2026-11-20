@@ -72,12 +72,13 @@ const [vault, config] = await Promise.all([VaultStore.open(), ProviderConfigStor
 const registry = createVaultRegistry(vault, {}, config);
 process.once("exit", () => vault.lock());
 
+const def = config.get(values.provider);
+if (!def) {
+  const extra = config.error ? ` (${config.error})` : "";
+  fail(`unknown provider "${values.provider}". Available: ${config.ids().join(", ")}${extra}`);
+}
+
 if (values.prompt !== undefined) {
-  const def = config.get(values.provider);
-  if (!def) {
-    const extra = config.error ? ` (${config.error})` : "";
-    fail(`unknown provider "${values.provider}". Available: ${config.ids().join(", ")}${extra}`);
-  }
   if (def.auth !== "none" && vault.state === "locked" && vault.protection === "passphrase") {
     if (!process.stdin.isTTY) {
       fail("the vault is locked and stdin is not a terminal; run albireo without --prompt and unlock it in the panel");

@@ -95,7 +95,8 @@ export async function runKeysCommand(
     vault = await openVault();
     const config = await openConfig(vault.dir);
     if (!config.has(provider)) {
-      throw new UsageError(`unknown provider "${provider}" (expected ${config.ids().join(" | ")})`);
+      const extra = config.error ? ` (${config.error})` : "";
+      throw new UsageError(`unknown provider "${provider}" (expected ${config.ids().join(" | ")})${extra}`);
     }
     const manager = managerFor(vault, config);
     return command === "set"
@@ -258,5 +259,6 @@ function providerLine(id: ProviderId, p: ProviderSecretView, width: number): str
   const parts = [keyState];
   if (p.baseURL) parts.push(`base URL ${p.baseURL}`);
   if (p.model) parts.push(`model ${p.model}`);
+  if (p.problem) parts.push(`unusable: ${p.problem}`);
   return `${id.padEnd(width)}  ${parts.join(" · ")}`;
 }
