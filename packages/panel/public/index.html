@@ -353,7 +353,10 @@ function buildProviderForm(id) {
   form.append(fields);
 
   for (const input of [baseField.input, modelField.input]) {
-    input.addEventListener("input", () => { input.dataset.dirty = "1"; });
+    input.addEventListener("input", () => {
+      if (input.value === (input.dataset.saved ?? "")) delete input.dataset.dirty;
+      else input.dataset.dirty = "1";
+    });
   }
   form.onsubmit = (e) => {
     e.preventDefault();
@@ -436,8 +439,12 @@ function renderProviderForm(id, view, formsUsable, needsUnlock) {
     return opt;
   }));
 
-  if (!f.base.dataset.dirty) f.base.value = view.baseURL ?? "";
-  if (!f.model.dataset.dirty) f.model.value = view.model ?? "";
+  const savedBase = view.baseURL ?? "";
+  const savedModel = view.model ?? "";
+  f.base.dataset.saved = savedBase;
+  f.model.dataset.saved = savedModel;
+  if (!f.base.dataset.dirty) f.base.value = savedBase;
+  if (!f.model.dataset.dirty) f.model.value = savedModel;
   return f.form;
 }
 
@@ -523,9 +530,10 @@ async function saveProvider(id, patch) {
     const f = forms.get(id);
     if (f) {
       f.key.value = "";
-      // Only a save that sent a field makes it clean; "Clear key" or saving another field keeps unsaved edits.
-      if (patch.baseURL !== undefined) delete f.base.dataset.dirty;
-      if (patch.model !== undefined) delete f.model.dataset.dirty;
+      // Only a save that sent a field makes it clean; "Clear key", saving another field, or
+      // edits typed while the save was in flight keep unsaved edits.
+      if (patch.baseURL !== undefined && f.base.value.trim() === patch.baseURL) delete f.base.dataset.dirty;
+      if (patch.model !== undefined && f.model.value.trim() === patch.model) delete f.model.dataset.dirty;
     }
     renderKeys();
     keysMsg(secrets.refreshPending ? "Saved. It takes effect when the current turn ends." : "Saved.");

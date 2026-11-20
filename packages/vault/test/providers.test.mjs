@@ -1011,17 +1011,38 @@ test("re-adding a removed provider with the same definition updates registry, se
       // Even if writing providers.json fails after beforeCreate cleared the vault, registry/session stay in sync.
       await manager.setProvider({ provider: "gw", apiKey: KEY });
       assert.ok(!(stores.registry.get("gw") instanceof UnconfiguredProvider));
-      await writeFile(stores.config.file, JSON.stringify({ providers: {} }));
-      stores.config.persist = async () => {
-        throw new Error("disk full");
+      const failingConfig = {
+        watch: (w) => stores.config.watch(w),
+        list: () => stores.config.list(),
+        get retained() {
+          return stores.config.retained;
+        },
+        get error() {
+          return stores.config.error;
+        },
+        async upsert(_id, _entry, opts) {
+          await opts?.beforeCreate?.();
+          throw new Error("disk full");
+        },
       };
+      const failingManager = new SecretManager({
+        vault: stores.vault,
+        registry: stores.registry,
+        config: failingConfig,
+        session,
+      });
+      let failNotifications = 0;
+      failingManager.onChange(() => {
+        failNotifications++;
+      });
       try {
-        await assert.rejects(manager.upsertProviderConfig({ id: "gw", ...entry }), /disk full/);
+        await assert.rejects(failingManager.upsertProviderConfig({ id: "gw", ...entry }), /disk full/);
       } finally {
-        delete stores.config.persist;
+        failingManager.dispose();
       }
       assert.ok(stores.registry.get("gw") instanceof UnconfiguredProvider);
-      assert.equal(notifications, 3);
+      assert.equal(stores.vault.read().providers.gw, undefined);
+      assert.equal(failNotifications, 1);
     } finally {
       manager.dispose();
     }
