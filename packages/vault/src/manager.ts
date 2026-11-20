@@ -1,14 +1,15 @@
 import type { ProviderAuthMode, ProviderHeaders, ProviderRegistry, Session, WireApi } from "@albireo/core";
+import { assertSafeBaseURLQuery, maskBaseURL } from "./credentials.js";
 import type { Protection } from "./crypto.js";
 import { VaultError } from "./errors.js";
 import {
   defaultProviderDefinitions,
   type ProviderCompat,
   type ProviderConfigEntry,
-  type ProviderConfigGuard,
   type ProviderConfigStore,
   type ProviderModelConfig,
   type ResolvedProviderDefinition,
+  validateProviderEntry,
 } from "./providers.js";
 import { maskApiKey, type ProviderFactory, registerVaultProviders } from "./registry.js";
 import { isBuiltinProviderId, isValidProviderId, type ProviderId, type VaultState, type VaultStore } from "./store.js";
@@ -26,7 +27,7 @@ export interface ProviderSecretView {
   keyHint: string | null;
   defaultBaseURL: string;
   defaultModel: string;
-  /** Vault-level baseURL override, if set. */
+  /** Vault-level baseURL override, if set. Query values other than version selectors are masked. */
   baseURL?: string;
   /** Vault-level model override, if set. */
   model?: string;
@@ -62,11 +63,8 @@ export interface ProviderUpdate {
 
 export interface ProviderConfigUpsert extends ProviderConfigEntry {
   id: ProviderId;
-}
-
-export interface ProviderConfigUpsertStatus extends SecretsStatus {
-  /** False when an existing entry was replaced, so a client knows whether undoing means deleting. */
-  created: boolean;
+  /** Optional key, saved to the vault before the entry is written; never stored in `providers.json`. */
+  apiKey?: string;
 }
 
 export interface SecretManagerOptions {
@@ -92,15 +90,17 @@ export class SecretManager {
   private session?: Session;
   private offSession?: () => void;
   private pendingRefresh = false;
-  /** Why the last reload of `providers.json` was held back, if it was. */
-  private heldReload: string | undefined;
   private listeners = new Set<() => void>();
+  /** Serializes config changes with their vault side effects. */
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: SecretManagerOptions) {
     this.vault = opts.vault;
     this.config = opts.config;
     this.registry = opts.registry;
     this.factories = opts.factories ?? {};
+    // The active provider stays defined even if providers.json drops it, so the session can refresh.
+    this.config?.retain(() => this.session?.providerId);
     if (opts.session) this.attach(opts.session);
   }
 
@@ -112,8 +112,8 @@ export class SecretManager {
         this.refreshSession();
         this.notify();
       }
-      // A reload held back for the previous provider may apply now.
-      if (e.type === "provider_changed" && this.heldReload) {
+      // A provider kept only because it was active can go once the session has moved on.
+      if (e.type === "provider_changed" && this.config?.retained) {
         this.reloadProviderConfig().catch(() => {});
       }
     });
@@ -133,7 +133,15 @@ export class SecretManager {
   status(): SecretsStatus {
     const vault = this.vault;
     const secrets = vault.state === "unlocked" ? vault.read() : null;
-    const configError = [this.heldReload, this.config?.error].filter(Boolean).join(" ");
+    const retained = this.config?.retained;
+    const configError = [
+      retained
+        ? `Active provider "${retained}" is no longer in providers.json; it stays available until you switch to another provider.`
+        : undefined,
+      this.config?.error,
+    ]
+      .filter(Boolean)
+      .join(" ");
     const definitions = this.definitions();
     const providerOrder: ProviderId[] = [];
     const providers: Record<ProviderId, ProviderSecretView> = {};
@@ -152,7 +160,7 @@ export class SecretManager {
         keyHint: maskApiKey(entry?.apiKey),
         defaultBaseURL: def.baseURL,
         defaultModel: def.defaultModel,
-        ...(entry?.baseURL ? { baseURL: entry.baseURL } : {}),
+        ...(entry?.baseURL ? { baseURL: maskBaseURL(entry.baseURL) } : {}),
         ...(entry?.model ? { model: entry.model } : {}),
         models: def.models.map((m) => ({
           ...structuredClone(m),
@@ -186,18 +194,16 @@ export class SecretManager {
   }
 
   /**
-   * Pick up external edits to `providers.json`. Reading, the active-provider check and the commit
-   * run as one step in the config store's queue. A file that drops the active provider is held
-   * back (it stays on disk) and applied by the first reload after the session switches away.
-   * Notifies only when something visible changed, so `GET /secrets` can call it every time.
+   * Pick up external edits to `providers.json`. If the file dropped the active provider, it stays
+   * defined until the session switches away. Notifies only when something visible changed, so
+   * `GET /secrets` can call it every time.
    */
   async reloadProviderConfig(): Promise<SecretsStatus> {
-    if (!this.config) return this.status();
-    const { changed, held } = await this.config.reload(this.keepActive);
-    const heldChanged = held !== this.heldReload;
-    this.heldReload = held;
-    if (changed) this.changed();
-    else if (heldChanged) this.notify();
+    const config = this.config;
+    if (!config) return this.status();
+    await this.exclusive(async () => {
+      if (await config.reload()) this.changed();
+    });
     return this.status();
   }
 
@@ -213,6 +219,12 @@ export class SecretManager {
         throw new VaultError("invalid", `${field} must be a string.`);
       }
     }
+    if (typeof body.baseURL === "string" && body.baseURL.trim()) {
+      const api = this.definitions().find((d) => d.id === body.provider)?.api;
+      const url = URL.canParse(body.baseURL.trim()) ? new URL(body.baseURL.trim()) : undefined;
+      // The vault checks the rest; only the wire API decides whether a query string works at all.
+      if (url) assertSafeBaseURLQuery(url, "The base URL", api);
+    }
     if (this.vault.state === "uninitialized") await this.vault.initialize();
     await this.vault.updateProvider(body.provider, {
       apiKey: body.apiKey as string | undefined,
@@ -225,64 +237,87 @@ export class SecretManager {
   }
 
   /**
-   * Add or update a provider endpoint definition in `providers.json`. Never accepts `apiKey`.
-   * Changes to the active provider apply like any other change: right away when idle, otherwise
-   * once the running turn ends.
+   * Add or update a provider endpoint definition in `providers.json`, with an optional initial
+   * `apiKey` that goes to the vault, never into the file. The key is saved first, so a key that
+   * can't be saved leaves no entry behind. A new custom provider never inherits a key or override
+   * that an earlier provider with the same ID left in the vault. Changes to the active provider
+   * apply like any other change: right away when idle, otherwise once the running turn ends.
    */
-  async upsertProviderConfig(
-    input: ProviderConfigUpsert | Record<string, unknown>,
-  ): Promise<ProviderConfigUpsertStatus> {
-    if (!this.config) {
-      throw new VaultError("unavailable", "Provider configuration store is not enabled.");
-    }
+  async upsertProviderConfig(input: ProviderConfigUpsert | Record<string, unknown>): Promise<SecretsStatus> {
+    const config = this.requireConfig();
     const body: Record<string, unknown> = typeof input === "object" && input !== null ? { ...input } : {};
-    const { id, ...entry } = body;
+    const { id, apiKey, ...entry } = body;
     if (!isValidProviderId(id)) {
       throw new VaultError(
         "invalid",
         `Invalid provider id: ${String(id)}. Use lowercase letters, digits, '.', '_' or '-'.`,
       );
     }
-    const { created } = await this.config.upsert(id, entry as ProviderConfigEntry, this.keepActive);
-    // The write started from the file on disk and passed the guard, so nothing is held back now.
-    this.heldReload = undefined;
-    this.changed();
-    return { ...this.status(), created };
+    if (apiKey !== undefined && typeof apiKey !== "string") throw new VaultError("invalid", "apiKey must be a string.");
+    const key = apiKey?.trim() ?? "";
+    // Fail on a bad entry before touching the vault.
+    validateProviderEntry(id, entry);
+    await this.exclusive(async () => {
+      try {
+        // Pick up other processes' edits, so "new" below also means "not on disk".
+        await config.reload();
+        const fresh = !isBuiltinProviderId(id) && !config.has(id);
+        if (fresh && this.vault.state === "locked") {
+          throw new VaultError(
+            "locked",
+            `Unlock the vault before adding "${id}", so anything stored under that ID before can be cleared.`,
+          );
+        }
+        if (fresh && this.vault.state === "unlocked") await this.vault.deleteProvider(id);
+        if (key) {
+          if (this.vault.state === "uninitialized") await this.vault.initialize();
+          await this.vault.updateProvider(id, { apiKey: key });
+        }
+        try {
+          await config.upsert(id, entry as ProviderConfigEntry);
+        } catch (err) {
+          // Don't leave the new key behind for a provider that was never written.
+          if (fresh && key) await this.vault.deleteProvider(id).catch(() => {});
+          throw err;
+        }
+      } finally {
+        this.changed();
+      }
+    });
+    return this.status();
   }
 
   /**
    * Remove a custom provider from `providers.json` together with its vault entry. Refused while
-   * the vault is locked: the stored key could not be erased, and a provider re-added later under
-   * the same ID would inherit it.
+   * the vault is locked, since the stored key could not be erased. The entry goes first: if the
+   * file can't be written, nothing is lost. A key that outlives it (the vault write failed) is
+   * cleared when a provider is added under the same ID again.
    */
   async deleteCustomProvider(id: unknown): Promise<SecretsStatus> {
-    if (!this.config) {
-      throw new VaultError("unavailable", "Provider configuration store is not enabled.");
-    }
+    const config = this.requireConfig();
     if (!isValidProviderId(id)) {
       throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
     }
     if (isBuiltinProviderId(id)) {
       throw new VaultError("invalid", `Built-in provider "${id}" cannot be deleted.`);
     }
-    if (!this.config.has(id)) {
-      throw new VaultError("invalid", `Unknown provider "${id}".`);
-    }
-    if (this.session?.providerId === id) {
-      throw new VaultError("invalid", `Cannot delete active provider "${id}". Switch to another provider first.`);
-    }
-    if (this.vault.state === "locked") {
-      throw new VaultError(
-        "locked",
-        `Unlock the vault before deleting "${id}", so its stored key is deleted too. With an unreadable vault, remove the entry from providers.json by hand.`,
-      );
-    }
-    // Key first: if removing the config entry then fails, the provider is left without a key
-    // rather than a key outliving its provider.
-    if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);
-    await this.config.remove(id, this.keepActive);
-    this.heldReload = undefined;
-    this.changed();
+    await this.exclusive(async () => {
+      if (!config.has(id)) {
+        throw new VaultError("invalid", `Unknown provider "${id}".`);
+      }
+      if (this.session?.providerId === id) {
+        throw new VaultError("invalid", `Cannot delete active provider "${id}". Switch to another provider first.`);
+      }
+      if (this.vault.state === "locked") {
+        throw new VaultError("locked", `Unlock the vault before deleting "${id}", so its stored key is deleted too.`);
+      }
+      try {
+        await config.remove(id);
+        if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);
+      } finally {
+        this.changed();
+      }
+    });
     return this.status();
   }
 
@@ -296,16 +331,16 @@ export class SecretManager {
     return this.status();
   }
 
-  /**
-   * Config guard: never commit entries that drop the active custom provider, or the registry
-   * would unregister it and the session could no longer refresh. Evaluated inside the config
-   * store's queue, against what is about to be committed.
-   */
-  private readonly keepActive: ProviderConfigGuard = (next) => {
-    const active = this.session?.providerId;
-    if (!active || isBuiltinProviderId(active) || Object.hasOwn(next, active)) return undefined;
-    return `Active provider "${active}" was removed from providers.json; switch to another provider first.`;
-  };
+  private requireConfig(): ProviderConfigStore {
+    if (!this.config) throw new VaultError("unavailable", "Provider configuration store is not enabled.");
+    return this.config;
+  }
+
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn);
+    this.queue = run.catch(() => {});
+    return run;
+  }
 
   private definitions(): ResolvedProviderDefinition[] {
     return this.config ? this.config.list() : defaultProviderDefinitions();

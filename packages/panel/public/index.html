@@ -505,7 +505,8 @@ async function saveProvider(id, patch) {
     const f = forms.get(id);
     if (f) {
       f.key.value = "";
-      delete f.form.dataset.dirty;
+      // Only a save that sent the overrides makes them clean; "Clear key" keeps unsaved edits.
+      if (patch.baseURL !== undefined) delete f.form.dataset.dirty;
     }
     renderKeys();
     keysMsg(secrets.refreshPending ? "Saved. It takes effect when the current turn ends." : "Saved.");
@@ -571,32 +572,18 @@ $("custom-provider-form").onsubmit = async (e) => {
     ...(modelIds.length > 0 ? { models: modelIds.map((m) => ({ id: m })) } : {}),
     compat,
   };
+  // The server saves the key before the entry, so a key it rejects leaves nothing to undo.
   const initialKey = $("cp-key").value.trim();
+  if (auth !== "none" && initialKey) payload.apiKey = initialKey;
   keysMsg("Saving custom provider…");
-  // Set from the server's answer, not from local state that may be stale or not loaded yet.
-  let created = false;
   try {
-    const saved = await api("/providers", payload);
-    secrets = saved;
-    created = saved.created === true;
-    if (auth !== "none" && initialKey) {
-      secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
-    }
+    secrets = await api("/providers", payload);
     $("custom-provider-form").reset();
     $("cp-key").value = "";
     $("custom-provider-box").open = false;
     renderKeys();
     keysMsg(`Saved custom provider "${id}".`);
   } catch (err) {
-    // Only roll back a provider this request created; replacing an existing one keeps it.
-    if (created) {
-      try {
-        secrets = await api(`/providers/${encodeURIComponent(id)}`, undefined, "DELETE");
-      } catch {
-        // Keep the original error visible; the provider can be removed manually.
-      }
-      renderKeys();
-    }
     keysMsg(err.message, true);
   }
 };

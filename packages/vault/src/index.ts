@@ -3,7 +3,6 @@ export { VaultError, type VaultErrorCode } from "./errors.js";
 export { defaultVaultDir } from "./fs.js";
 export {
   type ProviderConfigUpsert,
-  type ProviderConfigUpsertStatus,
   type ProviderSecretView,
   type ProviderUpdate,
   SecretManager,
@@ -26,11 +25,8 @@ export {
   PROVIDERS_FILE,
   type ProviderCompat,
   type ProviderConfigEntry,
-  type ProviderConfigGuard,
-  type ProviderConfigReload,
   ProviderConfigStore,
   type ProviderConfigStoreOptions,
-  type ProviderConfigUpsertResult,
   type ProviderModelConfig,
   type ProvidersFile,
   parseProvidersFile,

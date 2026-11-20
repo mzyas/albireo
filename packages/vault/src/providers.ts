@@ -13,7 +13,7 @@ import {
   type ProviderHeaders,
   type WireApi,
 } from "@albireo/core";
-import { assertSafeBaseURLQuery, isAllowedHeader } from "./credentials.js";
+import { assertSafeBaseURLQuery, isCredentialHeader } from "./credentials.js";
 import { VaultError } from "./errors.js";
 import { defaultVaultDir, writeFileAtomic } from "./fs.js";
 import {
@@ -49,25 +49,6 @@ export interface ProviderConfigEntry {
 
 export interface ProvidersFile {
   providers: Record<string, ProviderConfigEntry>;
-}
-
-/**
- * Checked against the entries a reload or write is about to commit, inside the same queued section
- * as the read and the commit. Returns a reason to refuse, or undefined to go ahead.
- */
-export type ProviderConfigGuard = (next: Readonly<Record<string, ProviderConfigEntry>>) => string | undefined;
-
-export interface ProviderConfigReload {
-  /** Whether definitions or the parse error changed. */
-  changed: boolean;
-  /** The guard's reason when the file was read but not applied; it stays on disk for a later reload. */
-  held?: string;
-}
-
-export interface ProviderConfigUpsertResult {
-  definition: ResolvedProviderDefinition;
-  /** False when the entry already existed in `providers.json` and was replaced. */
-  created: boolean;
 }
 
 /** Parsed file before it is committed to memory. */
@@ -169,6 +150,8 @@ export class ProviderConfigStore {
   readonly file: string;
   private entries: Record<string, ProviderConfigEntry> = {};
   private problem: string | undefined;
+  private kept: ProviderId | undefined;
+  private keep: (() => ProviderId | undefined) | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(opts: ProviderConfigStoreOptions) {
@@ -191,24 +174,33 @@ export class ProviderConfigStore {
     return this.problem;
   }
 
+  /** A custom provider kept defined (see `retain`) although `providers.json` no longer has it. */
+  get retained(): ProviderId | undefined {
+    return this.kept;
+  }
+
+  /**
+   * Keep the provider `fn` names (the session's active one) defined even when the file drops it,
+   * so the registry never unregisters a provider in use. Asked at every commit, right after the
+   * read or write it follows, so a switch made while that was in flight still counts. The kept
+   * entry goes away at the first commit after `fn` names another provider.
+   */
+  retain(fn: () => ProviderId | undefined): void {
+    this.keep = fn;
+  }
+
   /** All resolved providers: built-ins first, then custom providers in file order. */
   list(): ResolvedProviderDefinition[] {
     return resolveDefinitions(this.entries);
   }
 
   /**
-   * Re-read `providers.json` and commit it unless `guard` refuses. Read, check and commit happen in
-   * one queued section, so a write queued meanwhile can't be overwritten by an older read. A live
-   * kernel should go through `SecretManager.reloadProviderConfig()`, which passes the guard that
-   * keeps the active provider registered.
+   * Re-read `providers.json`. Returns whether the definitions, the error or the retained provider
+   * changed. Read and commit happen in one queued section, so a write queued meanwhile can't be
+   * overwritten by an older read.
    */
-  reload(guard: ProviderConfigGuard): Promise<ProviderConfigReload> {
-    return this.exclusive(async () => {
-      const snapshot = await this.readSnapshot();
-      const held = guard(snapshot.entries);
-      if (held) return { changed: false, held };
-      return { changed: this.commitSnapshot(snapshot) };
-    });
+  reload(): Promise<boolean> {
+    return this.exclusive(async () => this.commit(await this.readSnapshot()));
   }
 
   ids(): ProviderId[] {
@@ -229,27 +221,23 @@ export class ProviderConfigStore {
 
   /**
    * Validate and save a provider entry (custom provider or built-in override). The write starts
-   * from the file on disk, so `guard` sees exactly what will be committed and can refuse it.
+   * from the file on disk, so other entries end up as the file has them.
    */
-  upsert(id: ProviderId, entry: ProviderConfigEntry, guard?: ProviderConfigGuard): Promise<ProviderConfigUpsertResult> {
+  upsert(id: ProviderId, entry: ProviderConfigEntry): Promise<ResolvedProviderDefinition> {
     return this.exclusive(async () => {
       const clean = validateProviderEntry(id, entry);
-      const current = await this.readForWrite();
-      const created = !Object.hasOwn(current, id);
-      const next: Record<string, ProviderConfigEntry> = { ...current, [id]: clean };
-      this.check(guard, next);
+      const next: Record<string, ProviderConfigEntry> = { ...(await this.readForWrite()), [id]: clean };
       await this.persist(next);
-      this.entries = next;
-      this.problem = undefined;
-      return { definition: resolveOne(id, clean), created };
+      this.commit({ entries: next });
+      return resolveOne(id, clean);
     });
   }
 
   /**
    * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Either way
-   * the in-memory entries then match the file.
+   * the in-memory entries then match the file (apart from a retained provider).
    */
-  remove(id: ProviderId, guard?: ProviderConfigGuard): Promise<boolean> {
+  remove(id: ProviderId): Promise<boolean> {
     return this.exclusive(async () => {
       if (!isValidProviderId(id)) {
         throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
@@ -258,10 +246,8 @@ export class ProviderConfigStore {
       const existed = Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current };
       delete next[id];
-      this.check(guard, next);
       if (existed) await this.persist(next);
-      this.entries = next;
-      this.problem = undefined;
+      this.commit({ entries: next });
       return existed;
     });
   }
@@ -274,36 +260,49 @@ export class ProviderConfigStore {
     return run;
   }
 
-  private check(guard: ProviderConfigGuard | undefined, next: Record<string, ProviderConfigEntry>): void {
-    const refusal = guard?.(next);
-    if (refusal) throw new VaultError("invalid", refusal);
-  }
-
   private async loadFromDisk(): Promise<void> {
-    this.commitSnapshot(await this.readSnapshot());
+    this.commit(await this.readSnapshot());
   }
 
-  private commitSnapshot(snapshot: Snapshot): boolean {
+  /**
+   * Make `snapshot` the in-memory state, keeping the retained provider if the snapshot drops it.
+   * Synchronous, and called with nothing awaited after the read or write it follows, so the
+   * retained ID is current. Returns whether anything visible changed.
+   */
+  private commit(snapshot: Snapshot): boolean {
     const before = JSON.stringify(this.entries);
     const beforeProblem = this.problem;
-    this.entries = snapshot.entries;
+    const beforeKept = this.kept;
+    const entries = snapshot.entries;
+    const keep = this.keep?.();
+    this.kept = undefined;
+    if (keep && !isBuiltinProviderId(keep) && !Object.hasOwn(entries, keep) && Object.hasOwn(this.entries, keep)) {
+      entries[keep] = this.entries[keep] as ProviderConfigEntry;
+      this.kept = keep;
+    }
+    this.entries = entries;
     this.problem = snapshot.problem;
-    return JSON.stringify(this.entries) !== before || this.problem !== beforeProblem;
+    return JSON.stringify(this.entries) !== before || this.problem !== beforeProblem || this.kept !== beforeKept;
   }
 
   /**
    * Parse the file without mutating state. On a read failure or a broken file the last good
    * entries are kept (a half-written file must not make the running kernel forget its custom
-   * providers). A single invalid entry is reported and replaced by its last good version, if any;
-   * the other entries still load.
+   * providers). So is a file that disappears after entries were loaded from it: editors that
+   * save by renaming leave it missing for a moment. A single invalid entry is reported and
+   * replaced by its last good version, if any; the other entries still load.
    */
   private async readSnapshot(): Promise<Snapshot> {
     let text: string;
     try {
       text = await readFile(this.file, "utf8");
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: {}, problem: undefined };
-      return { entries: structuredClone(this.entries), problem: `Cannot read ${this.file}.` };
+      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+      if (missing && Object.keys(this.entries).length === 0) return { entries: {} };
+      const problem = missing
+        ? `${this.file} is missing; keeping the providers loaded from it. Restore it, or restart to start without it.`
+        : `Cannot read ${this.file}.`;
+      return { entries: structuredClone(this.entries), problem };
     }
     try {
       const { providers, errors } = parseProviders(text, this.entries);
@@ -430,7 +429,7 @@ export function validateProviderEntry(id: unknown, raw: unknown): ProviderConfig
   }
 
   if (raw.baseURL !== undefined) {
-    const baseURL = validateBaseURL(raw.baseURL, `providers.${id}.baseURL`);
+    const baseURL = validateBaseURL(raw.baseURL, `providers.${id}.baseURL`, resolvedApi);
     if (baseURL) out.baseURL = baseURL;
   }
   if (!builtin && !out.baseURL) {
@@ -538,7 +537,7 @@ function validateText(v: unknown, label: string, max: number): string {
   return trimmed;
 }
 
-function validateBaseURL(v: unknown, label: string): string {
+function validateBaseURL(v: unknown, label: string, api: WireApi): string {
   const trimmed = validateText(v, label, 2048);
   if (!trimmed) return "";
   let url: URL;
@@ -553,7 +552,7 @@ function validateBaseURL(v: unknown, label: string): string {
   if (url.username || url.password) {
     throw new VaultError("invalid", `${label} must not embed credentials; put keys in the vault.`);
   }
-  assertSafeBaseURLQuery(url, label);
+  assertSafeBaseURLQuery(url, label, api);
   return trimmed;
 }
 
@@ -571,10 +570,10 @@ function validateHeaders(v: unknown, label: string): ProviderHeaders {
       out[name] = null;
       continue;
     }
-    if (!isAllowedHeader(name)) {
+    if (isCredentialHeader(name)) {
       throw new VaultError(
         "invalid",
-        `Header "${name}" is not allowed in ${label}; only non-credential metadata headers are accepted, keys belong in the vault.`,
+        `Header "${name}" is not allowed in ${label}: it looks like a credential, and keys belong in the vault.`,
       );
     }
     if (typeof value !== "string" || value.length > 4096 || CONTROL.test(value)) {

@@ -222,7 +222,8 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
       401,
     );
 
-    const leaked = await request(s.base, {
+    // An initial key goes to the vault, never into providers.json or the response.
+    const withKey = await request(s.base, {
       method: "POST",
       pathname: "/providers",
       token: s.token,
@@ -234,8 +235,18 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
         apiKey: KEY,
       },
     });
-    assert.equal(leaked.status, 400);
-    assert.ok(!leaked.text.includes(KEY));
+    assert.equal(withKey.status, 200);
+    assert.ok(!withKey.text.includes(KEY));
+    assert.equal(JSON.parse(withKey.text).providers.deepseek.hasKey, true);
+    assert.ok(!(await readFile(s.config.file, "utf8")).includes(KEY));
+    const rejected = await request(s.base, {
+      method: "POST",
+      pathname: "/providers",
+      token: s.token,
+      body: { id: "deepseek", authToken: KEY },
+    });
+    assert.equal(rejected.status, 400);
+    assert.ok(!rejected.text.includes(KEY));
 
     const created = await request(s.base, {
       method: "POST",
@@ -253,8 +264,7 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
     assert.equal(created.status, 200);
     assert.equal(created.headers["cache-control"], "no-store");
     const status = JSON.parse(created.text);
-    assert.equal(status.created, true);
-    assert.deepEqual(status.providerOrder, ["anthropic", "openai", "ollama"]);
+    assert.deepEqual(status.providerOrder, ["anthropic", "openai", "deepseek", "ollama"]);
     assert.equal(status.providers.ollama.configured, true);
     assert.equal(status.providers.ollama.builtin, false);
 
@@ -288,7 +298,7 @@ test("POST /providers and DELETE /providers/:id manage custom providers behind a
     });
     const deleted = await request(s.base, { method: "DELETE", pathname: "/providers/ollama", token: s.token });
     assert.equal(deleted.status, 200);
-    assert.deepEqual(JSON.parse(deleted.text).providerOrder, ["anthropic", "openai"]);
+    assert.deepEqual(JSON.parse(deleted.text).providerOrder, ["anthropic", "openai", "deepseek"]);
   } finally {
     await s.cleanup();
   }

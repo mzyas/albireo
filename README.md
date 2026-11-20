@@ -24,22 +24,9 @@ node packages/cli/dist/cli.js keys set anthropic  # 在终端里保存 API 密�
 node packages/cli/dist/cli.js --help       # 全部参数
 ```
 
-除了内置的 Anthropic / OpenAI，还可以接任何兼容 `anthropic-messages` 或 `openai-completions` 线协议的端点（DeepSeek、OpenRouter、Ollama、LiteLLM、自建网关等）。在面板的 **API Keys & Providers** 里添加，或在用户配置目录（和加密 vault 同目录）的 `providers.json` 中声明：
+除了内置的 Anthropic / OpenAI，还可以接兼容 Anthropic Messages 或 OpenAI Chat Completions 协议的端点（DeepSeek、OpenRouter、Ollama、LiteLLM、自建网关等）。在面板的 **API Keys** 里添加，或者写进用户配置目录（和加密 vault 同目录）的 `providers.json`，可用字段以 `packages/vault/src/providers.ts` 的校验逻辑为准。这个文件只放非敏感配置，key 一律存进加密 vault。
 
-```json
-{
-  "providers": {
-    "ollama": {
-      "api": "openai-completions",
-      "baseURL": "http://127.0.0.1:11434/v1",
-      "defaultModel": "<model-id>",
-      "auth": "none"
-    }
-  }
-}
-```
-
-`providers.json` 只放非敏感配置；API key / bearer token 一律通过面板或 `albireo keys set <provider>` 存进加密 vault。字段、兼容开关和模型覆写的完整列表以 `packages/vault/src/providers.ts` 的校验逻辑为准。外部修改这个文件后，**面板刷新**会让运行中的内核重新读取（`albireo keys status` 只读取自己的进程，不会让已有内核重载）。删除当前正在使用的 provider 需要先在面板切走；修改它的配置或 key / base URL / model 覆写都会在空闲时自动生效。口令模式下要先解锁 vault 才能删除自定义 provider，这样它存的 key 会一起删掉。
+在面板里做的修改空闲时立即生效；直接改 `providers.json` 后刷新面板即可生效。在终端里用 `keys` 子命令改的密钥，要重启内核才会生效。
 
 面板服务只监听本机回环地址，每次启动都会生成新的访问 token。需要写文件或执行命令的工具调用默认要在面板里批准。
 
