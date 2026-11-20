@@ -395,13 +395,18 @@ function renderProviderForm(id, view, formsUsable, needsUnlock) {
   if (!f) f = buildProviderForm(id);
   f.title.textContent = view.name === id ? id : `${view.name} (${id})`;
   f.apiBadge.textContent = view.api;
-  if (view.auth === "none") {
+  if (view.problem) {
+    // Something other than the key keeps it from working, e.g. a base URL that fails the checks.
+    f.badge.textContent = "unusable";
+    f.badge.classList.remove("ok");
+  } else if (view.auth === "none") {
     f.badge.textContent = "no key needed";
     f.badge.classList.add("ok");
   } else {
     f.badge.textContent = view.hasKey ? "encrypted" : "not configured";
     f.badge.classList.toggle("ok", view.hasKey);
   }
+  f.badge.title = view.problem ?? "";
 
   f.del.hidden = view.builtin;
   const isActive = id === currentProvider;
@@ -447,10 +452,16 @@ function syncCustomProviderFields() {
   );
   const auth = $("cp-auth").value;
   $("cp-key-row").hidden = auth === "none" || !formsUsable;
-  // The server refuses new providers until a passphrase vault is unlocked, like deletes.
+  // The server refuses new providers while the vault is locked or can't be opened: a key stored
+  // under the same ID before could not be cleared.
   const submit = $("cp-submit");
-  submit.disabled = secrets?.needsUnlock === true;
-  submit.title = submit.disabled ? "Unlock the vault before adding a provider" : "";
+  const blocked = secrets?.needsUnlock
+    ? "Unlock the vault before adding a provider"
+    : secrets?.error
+      ? "Fix the vault before adding a provider: it can't be opened"
+      : "";
+  submit.disabled = Boolean(blocked);
+  submit.title = blocked;
 }
 
 function renderKeys() {
@@ -463,11 +474,15 @@ function renderKeys() {
 
   const current = currentProvider && s.providers[currentProvider];
   const needsVault = current?.auth !== "none";
-  const attention = Boolean(s.error || s.configError) || (needsVault && (s.state !== "unlocked" || !current?.configured));
+  const attention =
+    Boolean(s.error || s.configError || current?.problem) ||
+    (needsVault && (s.state !== "unlocked" || !current?.configured));
   $("keys-badge").hidden = !attention;
   open.setAttribute("aria-label", attention ? "API Keys (needs attention)" : "API Keys");
   open.title = attention
-    ? (s.configError ?? (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)))
+    ? (s.configError ??
+      current?.problem ??
+      (s.state === "unlocked" ? `No ${currentProvider} key saved` : describeVault(s)))
     : "";
 
   const formsUsable = s.state === "unlocked" || (s.state === "uninitialized" && s.protection === "os-keychain");

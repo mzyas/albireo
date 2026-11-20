@@ -5,8 +5,8 @@ import { builtinTools, type Risk, Session } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
 import {
   createVaultRegistry,
-  isProviderReady,
   ProviderConfigStore,
+  providerProblem,
   registerVaultProviders,
   SecretManager,
   VaultError,
@@ -90,12 +90,9 @@ if (values.prompt !== undefined) {
     }
     registerVaultProviders(registry, vault, {}, config);
   }
-  if (!isProviderReady(vault, values.provider, config)) {
-    if (vault.error) fail(vault.error);
-    fail(
-      `no API key for "${values.provider}" in the vault. Add it with \`albireo keys set ${values.provider}\`, or under "API Keys" in the panel.`,
-    );
-  }
+  // The same check the registry makes, so a provider that passes it doesn't fail its first turn.
+  const problem = providerProblem(vault, def);
+  if (problem) fail(problem.message);
 }
 
 let session: Session;
@@ -147,9 +144,9 @@ const vaultLine = (() => {
   }
   if (vault.state === "uninitialized") return `Vault: empty — add API keys under "API Keys" in the panel`;
   if (vault.state === "locked") return `Vault: locked — unlock it under "API Keys" in the panel`;
-  if (!isProviderReady(vault, session.providerId, config)) {
-    return `Vault: no ${session.providerId} key — add it in the panel`;
-  }
+  const problem = activeDef && providerProblem(vault, activeDef);
+  if (problem?.cause === "base-url") return `Vault: ${problem.message}`;
+  if (problem) return `Vault: no ${session.providerId} key — add it in the panel`;
   return `Vault: unlocked (${vault.protection})`;
 })();
 const configLine = config.error ? `Providers: ${config.error}\n` : "";

@@ -37,9 +37,10 @@ export {
 export {
   createVaultRegistry,
   hasProviderKey,
-  isProviderReady,
   maskApiKey,
   type ProviderFactory,
+  type ProviderProblem,
+  providerProblem,
   type ResolvedProviderConfig,
   redactError,
   registerVaultProviders,

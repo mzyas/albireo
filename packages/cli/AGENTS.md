@@ -10,7 +10,7 @@
 - `--yolo` 把 `autoApprove` 扩大到全部风险等级；默认只放行 `read`。
 - Provider 来自 `@albireo/vault` 的 `createVaultRegistry()`，凭据存在加密 vault，非敏感端点定义存在同目录的 `providers.json`（`ProviderConfigStore.open()`），**不读环境变量**。启动时同时打开两者，再把 `SecretManager` 交给面板服务。
   - 服务模式：vault 为空、锁定、缺 key 或 `providers.json` 损坏都照常启动，打印状态，让用户在面板里配置。
-  - 无头模式：所选 provider 为 `auth: "none"` 时不要求 vault 解锁或存 key；其余情况在口令模式下于 TTY 提示输入口令（不回显），非 TTY 或缺 key 时直接 `fail()`。
+  - 无头模式：所选 provider 为 `auth: "none"` 时不要求 vault 解锁或存 key；其余情况在口令模式下于 TTY 提示输入口令（不回显），非 TTY 或缺 key 时直接 `fail()`。能不能用以 vault 的 `providerProblem` 为准（和 registry 是同一套判断，baseURL 过不了检查也算），不能用时打印它给的原因。
 - `albireo keys` 的约束：
   - 支持内置与 `providers.json` 中的全部自定义 provider；状态输出按 provider ID 动态对齐，对 `auth: "none"` 显示 `no key needed`。
   - **API key 不从命令行参数读取**：TTY 上不回显提示，否则从管道 stdin 读。多出的位置参数直接报用法错误，错误信息里不回显这个参数（多半是误贴的 key）。

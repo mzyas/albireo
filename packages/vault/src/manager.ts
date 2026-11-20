@@ -10,7 +10,7 @@ import {
   type ProviderModelConfig,
   type ResolvedProviderDefinition,
 } from "./providers.js";
-import { maskApiKey, type ProviderFactory, registerVaultProviders } from "./registry.js";
+import { maskApiKey, type ProviderFactory, providerProblem, registerVaultProviders } from "./registry.js";
 import { isBuiltinProviderId, isValidProviderId, type ProviderId, type VaultState, type VaultStore } from "./store.js";
 
 /** What clients may see about one provider. Never the key itself. */
@@ -20,8 +20,10 @@ export interface ProviderSecretView {
   api: WireApi;
   auth: ProviderAuthMode;
   builtin: boolean;
-  /** True when the provider is ready to make requests (always true for `auth: "none"`). */
+  /** True when the provider is ready to make requests (`auth: "none"` needs no key). */
   configured: boolean;
+  /** Why it can't make requests, when the reason is not a missing key: a base URL that fails the checks. */
+  problem?: string;
   hasKey: boolean;
   keyHint: string | null;
   defaultBaseURL: string;
@@ -45,7 +47,8 @@ export interface SecretsStatus {
   error?: string;
   /**
    * True when the vault is locked and unlocking it would fix that (passphrase mode). Adding and
-   * deleting custom providers waits for it; a vault that can't be opened at all (`error`) doesn't.
+   * deleting custom providers wait for it. A vault that can't be opened at all (`error`) blocks
+   * adding a custom provider, not deleting one.
    */
   needsUnlock: boolean;
   /** Problem reading `providers.json`, if any (built-ins remain available). */
@@ -157,13 +160,15 @@ export class SecretManager {
       providerOrder.push(def.id);
       const entry = secrets?.providers[def.id];
       const hasKey = Boolean(entry?.apiKey);
+      const problem = providerProblem(vault, def);
       providers[def.id] = {
         id: def.id,
         name: def.name,
         api: def.api,
         auth: def.auth,
         builtin: def.builtin,
-        configured: def.auth === "none" || hasKey,
+        configured: !problem,
+        ...(problem?.cause === "base-url" ? { problem: problem.message } : {}),
         hasKey,
         keyHint: maskApiKey(entry?.apiKey),
         defaultBaseURL: def.baseURL,
@@ -239,10 +244,11 @@ export class SecretManager {
 
   /**
    * Add or update a provider endpoint definition in `providers.json`. Never accepts `apiKey`: keys
-   * go through `setProvider`. A new custom provider never inherits a key or override that an
-   * earlier provider with the same ID left in the vault (removed by hand, or while the vault
-   * could not be opened). Changes to the active provider apply like any other change: right away
-   * when idle, otherwise once the running turn ends.
+   * go through `setProvider`. A custom provider the file doesn't have is new, even if it is still
+   * listed (removed by hand, or kept only because it is in use), and never inherits a key or
+   * override an earlier provider with the same ID left in the vault; adding one waits until the
+   * vault is unlocked and can be opened. Changes to the active provider apply like any other
+   * change: right away when idle, otherwise once the running turn ends.
    */
   async upsertProviderConfig(input: ProviderConfigUpsert | Record<string, unknown>): Promise<SecretsStatus> {
     const config = this.requireConfig();
@@ -263,7 +269,7 @@ export class SecretManager {
    * provider is in use, including when the session switches to it during the delete (the config
    * store then puts the file back). The entry goes first: if the file can't be written, nothing is
    * lost. A key that outlives it (the vault could not be opened, or its write failed) is cleared
-   * when a provider is added under the same ID.
+   * when a provider is added under the same ID, which needs a vault that opens.
    */
   async deleteCustomProvider(id: unknown): Promise<SecretsStatus> {
     const config = this.requireConfig();
@@ -297,14 +303,21 @@ export class SecretManager {
   }
 
   /**
-   * Runs inside the config store's queue before a new custom provider is written. A vault that
-   * can't be opened at all (`vault.error`) holds nothing usable, so it doesn't block the add.
+   * Runs inside the config store's queue before a new custom provider is written, and clears what
+   * an earlier provider with the same ID left in the vault. Refused while the vault can't be read:
+   * a leftover would come back with the new provider once it can.
    */
   private async clearLeftovers(id: ProviderId): Promise<void> {
     if (this.needsUnlock()) {
       throw new VaultError(
         "locked",
         `Unlock the vault before adding "${id}", so anything stored under that ID before can be cleared.`,
+      );
+    }
+    if (this.vault.error) {
+      throw new VaultError(
+        "unavailable",
+        `Fix the Albireo vault before adding "${id}": while it can't be opened, a key stored under that ID before can't be cleared. ${this.vault.error}`,
       );
     }
     if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);

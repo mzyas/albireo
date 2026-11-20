@@ -158,7 +158,9 @@ export function defaultProviderDefinitions(): ResolvedProviderDefinition[] {
 
 /**
  * Non-secret provider endpoint configuration stored in `providers.json` next to `vault.enc.json`.
- * Never holds API keys or tokens; files containing `apiKey` or `authToken` are rejected.
+ * Never holds API keys or tokens: an entry with `apiKey` or `authToken` is invalid. Loading skips
+ * invalid entries and records `error` (a reload keeps an entry's last good version instead), so
+ * one bad entry doesn't hide the rest; writes require the whole file to be valid.
  */
 export class ProviderConfigStore {
   readonly dir: string;
@@ -176,8 +178,9 @@ export class ProviderConfigStore {
   }
 
   /**
-   * Read and validate `providers.json`. Never throws for a missing or invalid file: a missing
-   * file leaves only built-in providers; a broken file records `error` and falls back to built-ins.
+   * Read and validate `providers.json`. Never throws for a missing or invalid file: a missing file
+   * leaves only built-in providers, an invalid entry is skipped while the others load, and a file
+   * that can't be read or isn't valid JSON leaves only built-ins. Both problems go into `error`.
    */
   static async open(opts: ProviderConfigStoreOptions = {}): Promise<ProviderConfigStore> {
     const store = new ProviderConfigStore(opts);
@@ -233,9 +236,10 @@ export class ProviderConfigStore {
 
   /**
    * Validate and save a provider entry (custom provider or built-in override). The write starts
-   * from the file on disk, so other entries end up as the file has them. `beforeCreate` runs only
-   * for a custom provider that is neither on disk nor in memory, after the file was found
-   * writable and before anything is written; if it throws, nothing is.
+   * from the file on disk, so other entries end up as the file has them. `beforeCreate` runs for
+   * a custom provider the file doesn't have, even if memory still does (removed by hand and not
+   * reloaded yet, or kept only because it is in use): after the file was found writable and
+   * before anything is written; if it throws, nothing is.
    */
   upsert(
     id: ProviderId,
@@ -244,10 +248,8 @@ export class ProviderConfigStore {
   ): Promise<ResolvedProviderDefinition> {
     return this.exclusive(async () => {
       const clean = validateProviderEntry(id, entry);
-      const current = await this.readForWrite();
-      if (!isBuiltinProviderId(id) && !Object.hasOwn(current, id) && !Object.hasOwn(this.entries, id)) {
-        await opts.beforeCreate?.();
-      }
+      const { providers: current } = await this.readForWrite();
+      if (!isBuiltinProviderId(id) && !Object.hasOwn(current, id)) await opts.beforeCreate?.();
       const next: Record<string, ProviderConfigEntry> = { ...current, [id]: clean };
       await this.persist(next);
       this.commit({ entries: next });
@@ -258,7 +260,7 @@ export class ProviderConfigStore {
   /**
    * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Refused for
    * a provider in use (see `ProviderConfigWatcher.keep`), also when it comes into use while the
-   * file is being written: the file is then put back as it was, so nothing changes.
+   * file is being written: the file then gets its previous text back (see `putBack`).
    */
   remove(id: ProviderId): Promise<boolean> {
     return this.exclusive(async () => {
@@ -266,13 +268,13 @@ export class ProviderConfigStore {
         throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
       }
       if (this.inUse().has(id)) throw inUseError(id);
-      const current = await this.readForWrite();
+      const { text, providers: current } = await this.readForWrite();
       const existed = Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current };
       delete next[id];
       if (existed) await this.persist(next);
       if (this.inUse().has(id)) {
-        if (existed) await this.persist(current);
+        if (existed) await this.putBack(text, next);
         throw inUseError(id);
       }
       this.commit({ entries: next });
@@ -374,16 +376,17 @@ export class ProviderConfigStore {
     }
   }
 
-  private async readForWrite(): Promise<Record<string, ProviderConfigEntry>> {
+  /** The file's text (null when missing) and its entries, parsed strictly so a write can't drop one. */
+  private async readForWrite(): Promise<{ text: string | null; providers: Record<string, ProviderConfigEntry> }> {
     let text: string | null;
     try {
       text = await this.readText();
     } catch {
       throw new VaultError("corrupt", `Cannot read ${this.file}.`);
     }
-    if (text === null) return {};
+    if (text === null) return { text, providers: {} };
     try {
-      return parseProvidersFile(text).providers;
+      return { text, providers: parseProvidersFile(text).providers };
     } catch (err) {
       throw new VaultError(
         "corrupt",
@@ -395,6 +398,19 @@ export class ProviderConfigStore {
   private async persist(providers: Record<string, ProviderConfigEntry>): Promise<void> {
     const file: ProvidersFile = { providers };
     await writeFileAtomic(this.file, `${JSON.stringify(file, null, 2)}\n`);
+  }
+
+  /**
+   * Undo a write of `written`: the file gets back exactly the `text` it had, not a re-serialized
+   * copy. If that write fails too, memory follows the file as it now is, so an entry in use stays
+   * only as a kept one (reported by `retained`) instead of a file and memory that disagree.
+   */
+  private async putBack(text: string | null, written: Record<string, ProviderConfigEntry>): Promise<void> {
+    try {
+      if (text !== null) await writeFileAtomic(this.file, text);
+    } catch {
+      this.commit({ entries: written });
+    }
   }
 }
 

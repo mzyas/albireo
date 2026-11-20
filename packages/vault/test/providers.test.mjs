@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { builtinTools, Session } from "@albireo/core";
 import {
   CUSTOM_ANTHROPIC_COMPAT,
   createVaultRegistry,
   DEFAULT_ANTHROPIC_COMPAT,
   DEFAULT_OPENAI_COMPAT,
-  isProviderReady,
   MemoryKeyProtector,
   PROVIDERS_FILE,
   ProviderConfigStore,
+  providerProblem,
   SecretManager,
   UnconfiguredProvider,
   VAULT_FILE,
@@ -35,6 +36,19 @@ const isVaultError = (code) => (err) => err instanceof VaultError && err.code ==
 
 const local = { api: "openai-completions", baseURL: "http://127.0.0.1:11434/v1", defaultModel: "q", auth: "none" };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * Long enough for a reload to find providers.json missing, and well inside the time the store
+ * then waits for it to come back. A slow first read only means the reload sees the file anyway,
+ * which every test using this still passes.
+ */
+const MISSING_FILE_SEEN_MS = 50;
+
+/** Replace `file` the way editors do (temporary file, then rename), so no one reads it half-written. */
+async function replaceFile(file, text) {
+  await writeFile(`${file}.tmp`, text);
+  await rename(`${file}.tmp`, file);
+}
 
 /**
  * Open the stores on `dir`. `providers` is written to providers.json first; `keys` (provider ID to
@@ -69,9 +83,11 @@ function switchTo(session, id) {
  * (`run.operation`), `act(run)` runs after 0, 1, 2, … ticks and returns whether it took effect,
  * and `check(run, outcome, acted)` sees what both did. Stops at the first `act` that no longer
  * takes effect (the operation is past the point that matters), or once the operation finishes
- * before `act` runs.
+ * before `act` runs. Fails unless `act` took effect in some runs and not in others, so both
+ * orders were really checked.
  */
 async function sweep({ start, act, check }) {
+  const seen = new Set();
   for (let wait = 0, more = true; more; wait++) {
     await withDir(async (dir) => {
       const run = await start(dir);
@@ -86,10 +102,12 @@ async function sweep({ start, act, check }) {
       for (let i = 0; i < wait && !settled; i++) await tick();
       const finishedFirst = settled;
       const acted = act(run);
+      seen.add(acted);
       more = acted && !finishedFirst;
       await check(run, await outcome, acted);
     });
   }
+  assert.ok(seen.has(true) && seen.has(false), "act should take effect in some runs and not in others");
 }
 
 test("ProviderConfigStore defaults to built-ins when providers.json is absent", () =>
@@ -286,8 +304,8 @@ test("auth: none provider is ready without vault key; api-key custom provider us
     });
 
     const vault = await VaultStore.open({ dir, protector: new MemoryKeyProtector() });
-    assert.equal(isProviderReady(vault, "ollama", config), true);
-    assert.equal(isProviderReady(vault, "deepseek", config), false);
+    assert.equal(providerProblem(vault, config.get("ollama")), undefined);
+    assert.equal(providerProblem(vault, config.get("deepseek")).cause, "key");
 
     const seen = {};
     const factories = {
@@ -328,7 +346,7 @@ test("auth: none provider is ready without vault key; api-key custom provider us
 
     await vault.initialize();
     await vault.updateProvider("deepseek", { apiKey: KEY, baseURL: "https://override.example/v1" });
-    assert.equal(isProviderReady(vault, "deepseek", config), true);
+    assert.equal(providerProblem(vault, config.get("deepseek")), undefined);
 
     const registry2 = createVaultRegistry(vault, factories, config);
     const deepseek = registry2.get("deepseek");
@@ -498,17 +516,22 @@ test("a passphrase-locked vault refuses deleting and adding custom providers; PO
     manager.dispose();
   }));
 
-test("a vault that cannot be opened does not block adding or deleting keyless providers", () =>
+test("a vault that cannot be opened blocks adding custom providers, not changing or deleting them", () =>
   withDir(async (dir) => {
     await writeFile(path.join(dir, VAULT_FILE), "garbage");
-    const stores = await openStores(dir);
+    const stores = await openStores(dir, { providers: { ollama: local } });
     assert.equal(stores.vault.state, "locked");
     assert.ok(stores.vault.error);
     const manager = new SecretManager(stores);
     assert.equal(manager.status().needsUnlock, false);
 
-    await manager.upsertProviderConfig({ id: "ollama", ...local });
-    assert.equal(stores.registry.has("ollama"), true);
+    // A key left under the ID can't be cleared now, and the new provider would get it once the
+    // vault opens again.
+    await assert.rejects(manager.upsertProviderConfig({ id: "gw", ...local }), isVaultError("unavailable"));
+    assert.equal(stores.config.has("gw"), false);
+
+    await manager.upsertProviderConfig({ id: "ollama", ...local, defaultModel: "r" });
+    assert.equal(stores.config.get("ollama").defaultModel, "r");
     await manager.deleteCustomProvider("ollama");
     assert.equal(stores.config.has("ollama"), false);
     manager.dispose();
@@ -536,6 +559,35 @@ test("re-adding a provider removed outside the panel does not pick up its old ke
     // A built-in override is never "new": its key stays.
     const builtin = await manager.upsertProviderConfig({ id: "anthropic", baseURL: "https://proxy.example" });
     assert.equal(builtin.providers.anthropic.hasKey, true);
+    manager.dispose();
+  }));
+
+test("a provider the file no longer has is new when added again, even while it is still listed", () =>
+  withDir(async (dir) => {
+    const entry = { api: "openai-completions", baseURL: "https://gw-a.example/v1", defaultModel: "q" };
+    const old = { apiKey: KEY, baseURL: "https://old.example/v1" };
+    const stores = await openStores(dir, { providers: { gw: entry, active: entry }, keys: { gw: old, active: old } });
+    const { config, vault } = stores;
+    const session = sessionOn(stores.registry, "active", dir);
+    const manager = new SecretManager({ ...stores, session });
+    const again = { ...entry, baseURL: "https://gw-b.example/v1" };
+
+    // Removed by hand, and nothing has reloaded since: still listed, but gone from the file.
+    await writeFile(config.file, JSON.stringify({ providers: { active: entry } }));
+    assert.equal(config.has("gw"), true);
+    const readded = await manager.upsertProviderConfig({ id: "gw", ...again });
+    assert.equal(readded.providers.gw.hasKey, false);
+    assert.equal(readded.providers.gw.baseURL, undefined);
+
+    // Removed by hand while in use: kept until the session moves on, but adding it starts over.
+    await writeFile(config.file, JSON.stringify({ providers: { gw: again } }));
+    await manager.reloadProviderConfig();
+    assert.deepEqual([...config.retained], ["active"]);
+    const restarted = await manager.upsertProviderConfig({ id: "active", ...again });
+    assert.equal(config.retained.size, 0);
+    assert.equal(restarted.providers.active.hasKey, false);
+    assert.equal(vault.read().providers.active, undefined);
+    assert.equal(restarted.providers.active.configured, false);
     manager.dispose();
   }));
 
@@ -578,14 +630,16 @@ test("a provider that comes into use while it is being deleted is not deleted", 
       });
       const session = sessionOn(stores.registry, "anthropic", dir);
       const manager = new SecretManager({ ...stores, session });
-      return { ...stores, session, manager, operation: manager.deleteCustomProvider("gw") };
+      const text = await readFile(stores.config.file, "utf8");
+      return { ...stores, session, manager, text, operation: manager.deleteCustomProvider("gw") };
     },
     act: ({ session }) => switchTo(session, "gw"),
-    async check({ config, vault, registry, session, manager }, { error }, switched) {
+    async check({ config, vault, registry, session, manager, text }, { error }, switched) {
       if (switched) {
-        // The switch came first: the delete fails and leaves the file and the key as they were.
+        // The switch came first: the delete fails and leaves the file (to the byte) and the key
+        // as they were.
         assert.match(error?.message ?? "", /Provider "gw" is in use/);
-        assert.ok(JSON.parse(await readFile(config.file, "utf8")).providers.gw);
+        assert.equal(await readFile(config.file, "utf8"), text);
         assert.equal(vault.read().providers.gw.apiKey, KEY);
         assert.equal(config.retained.size, 0);
       } else {
@@ -711,10 +765,12 @@ test("reload keeps the last good config when the file is briefly corrupt or miss
     assert.equal(fixed.configError, undefined);
     assert.equal(notifications, 2);
 
-    // Editors that save by renaming leave the file missing for a moment.
+    // Editors that save by renaming leave the file missing for a moment. The file comes back only
+    // after the reload found it missing, so keeping ollama takes the second look.
     await rm(config.file);
     const reloading = manager.reloadProviderConfig();
-    await writeFile(config.file, goodFile);
+    await delay(MISSING_FILE_SEEN_MS);
+    await replaceFile(config.file, goodFile);
     assert.equal((await reloading).configError, undefined);
     assert.equal(registry.has("ollama"), true);
     assert.equal(notifications, 2);
@@ -790,22 +846,28 @@ test("a provider is only built with a base URL that passes today's checks", () =
       providers: { gw: local },
       keys: { gw: { baseURL: "https://gw.example/v1?api-version=1" } },
     });
-    const { registry } = stores;
+    const { config, registry, vault } = stores;
     const manager = new SecretManager(stores);
     assert.ok(!(registry.get("gw") instanceof UnconfiguredProvider));
+    assert.equal(manager.status().providers.gw.configured, true);
+    assert.equal(manager.status().providers.gw.problem, undefined);
 
     // Switching the wire API keeps the vault override, which anthropic-messages can't use.
-    await manager.upsertProviderConfig({ id: "gw", ...local, api: "anthropic-messages" });
+    const status = await manager.upsertProviderConfig({ id: "gw", ...local, api: "anthropic-messages" });
     const provider = registry.get("gw");
     assert.ok(provider instanceof UnconfiguredProvider);
     assert.match(provider.reason, /query string/);
+    // Status and the CLI's readiness check say the same, instead of a provider that looks ready.
+    assert.equal(status.providers.gw.configured, false);
+    assert.equal(status.providers.gw.problem, provider.reason);
+    assert.deepEqual(providerProblem(vault, config.get("gw")), { cause: "base-url", message: provider.reason });
     manager.dispose();
   }));
 
-test("a stored base URL override is shown with non-version query values and fragments masked", () =>
+test("a stored base URL override is shown with non-version query values, user info and fragments masked", () =>
   withDir(async (dir) => {
     const entry = { api: "openai-completions", baseURL: "https://gw.example/v1", defaultModel: "q" };
-    const { config } = await openStores(dir, { providers: { gw: entry, gw2: entry } });
+    const { config } = await openStores(dir, { providers: { gw: entry, gw2: entry, gw3: entry } });
     // Overrides saved before these checks existed can still hold a credential, and the vault no
     // longer accepts them, so this stand-in serves them. It has just the members SecretManager
     // and the registry read.
@@ -818,6 +880,7 @@ test("a stored base URL override is shown with non-version query values and frag
         providers: {
           gw: { apiKey: KEY, baseURL: "https://gw.example/v1?api-version=1&token=SECRET" },
           gw2: { apiKey: KEY, baseURL: "https://gw.example/v1#SECRET" },
+          gw3: { apiKey: KEY, baseURL: "https://user:SECRET@gw.example/v1" },
         },
         updatedAt: 0,
       }),
@@ -827,21 +890,36 @@ test("a stored base URL override is shown with non-version query values and frag
     const status = manager.status();
     assert.equal(status.providers.gw.baseURL, "https://gw.example/v1?api-version=1&token=••••");
     assert.equal(status.providers.gw2.baseURL, "https://gw.example/v1#••••");
+    // Masked, not dropped, so the URL shown still explains why it is refused.
+    assert.equal(status.providers.gw3.baseURL, "https://••••@gw.example/v1");
+    assert.match(status.providers.gw3.problem, /must not embed credentials/);
     assert.ok(!JSON.stringify(status).includes("SECRET"));
     // And the registry refuses to send requests there.
-    assert.ok(registry.get("gw") instanceof UnconfiguredProvider);
+    for (const id of ["gw", "gw2", "gw3"]) assert.ok(registry.get(id) instanceof UnconfiguredProvider);
     manager.dispose();
   }));
 
-test("a provider saved while a reload is reading the file is not dropped by that reload", () =>
+test("a save waits for a reload that is still reading the file, so that reload can't undo it", () =>
   withDir(async (dir) => {
-    const stores = await openStores(dir);
+    const stores = await openStores(dir, { providers: { ollama: local } });
+    const { config, registry } = stores;
     const manager = new SecretManager(stores);
-    const reloading = manager.reloadProviderConfig();
-    const adding = manager.upsertProviderConfig({ id: "gw", ...local, baseURL: "https://gw.example/v1" });
-    await Promise.all([reloading, adding]);
-    assert.equal(stores.config.has("gw"), true);
-    assert.equal(stores.registry.has("gw"), true);
+    const text = await readFile(config.file, "utf8");
+
+    // A missing file holds the reload in its second look, so it is still running when the file is
+    // back and the save starts; the save itself would be done in a few milliseconds.
+    await rm(config.file);
+    let reloaded = false;
+    const reloading = manager.reloadProviderConfig().then(() => {
+      reloaded = true;
+    });
+    await delay(MISSING_FILE_SEEN_MS);
+    await replaceFile(config.file, text);
+    await manager.upsertProviderConfig({ id: "gw", ...local, baseURL: "https://gw.example/v1" });
+    assert.equal(reloaded, true, "the save must not run while the reload is in progress");
+    await reloading;
+    assert.equal(config.has("gw"), true);
+    assert.equal(registry.has("gw"), true);
     manager.dispose();
   }));
 

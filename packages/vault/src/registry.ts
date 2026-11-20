@@ -21,8 +21,9 @@ import {
   type ProviderCompat,
   type ProviderConfigStore,
   type ProviderModelConfig,
+  type ResolvedProviderDefinition,
 } from "./providers.js";
-import type { ProviderId, VaultStore } from "./store.js";
+import type { ProviderId, ProviderSecret, VaultStore } from "./store.js";
 
 /** What a provider is built from. `baseURL` is always set, so the SDK never falls back to the environment. */
 export interface ResolvedProviderConfig {
@@ -76,24 +77,11 @@ export function registerVaultProviders(
   const secrets = vault.state === "unlocked" ? vault.read() : null;
   for (const def of definitions) {
     const entry = secrets?.providers[def.id];
-    const baseURL = entry?.baseURL ?? def.baseURL;
     const model = entry?.model ?? def.defaultModel;
 
-    // An override saved under older rules, or one that predates a change of wire API.
-    const urlProblem = baseURLProblem(baseURL, def.api);
-    if (urlProblem) {
-      const reason = `${def.name} cannot be used: ${urlProblem} Change the base URL under "API Keys" in the panel.`;
-      registry.register(def.id, () => new UnconfiguredProvider(def.id, model, reason));
-      continue;
-    }
-
-    if (def.auth !== "none" && !entry?.apiKey) {
-      const reason = vault.error
-        ? `The Albireo vault could not be opened, so the ${def.name} API key is unavailable: ${vault.error}`
-        : vault.state === "locked"
-          ? `The Albireo vault is locked, so the ${def.name} API key is unavailable. Unlock it under "API Keys" in the panel.`
-          : `The ${def.name} API key is not configured in the Albireo vault. Add it under "API Keys" in the panel, or with \`albireo keys set ${def.id}\` and restart.`;
-      registry.register(def.id, () => new UnconfiguredProvider(def.id, model, reason));
+    const problem = problemWith(vault, def, entry);
+    if (problem) {
+      registry.register(def.id, () => new UnconfiguredProvider(def.id, model, problem.message));
       continue;
     }
 
@@ -102,7 +90,7 @@ export function registerVaultProviders(
       api: def.api,
       auth: def.auth,
       ...(def.auth !== "none" && entry?.apiKey ? { apiKey: entry.apiKey } : {}),
-      baseURL,
+      baseURL: entry?.baseURL ?? def.baseURL,
       model,
       ...(def.headers ? { headers: { ...def.headers } } : {}),
       compat: { ...def.compat },
@@ -133,12 +121,44 @@ export function hasProviderKey(vault: VaultStore, id: string): boolean {
   return Boolean(entry?.apiKey);
 }
 
-/** Whether provider `id` is ready to run turns right now (`auth: "none"` needs no key). */
-export function isProviderReady(vault: VaultStore, id: string, config?: ProviderConfigStore): boolean {
-  const def = config ? config.get(id) : defaultProviderDefinitions().find((p) => p.id === id);
-  if (!def) return false;
-  if (def.auth === "none") return true;
-  return hasProviderKey(vault, id);
+/** Why a provider can't run turns right now. */
+export interface ProviderProblem {
+  /** `base-url`: the base URL it would be built with fails the checks. `key`: no usable key. */
+  cause: "base-url" | "key";
+  /** Safe to show; says how to fix it. */
+  message: string;
+}
+
+/**
+ * Why provider `def` can't run turns right now, or undefined when it can (`auth: "none"` needs no
+ * key). The registry, the status view and the CLI all go by this, so a provider never looks ready
+ * and then fails its turn.
+ */
+export function providerProblem(vault: VaultStore, def: ResolvedProviderDefinition): ProviderProblem | undefined {
+  return problemWith(vault, def, vault.state === "unlocked" ? vault.read().providers[def.id] : undefined);
+}
+
+function problemWith(
+  vault: VaultStore,
+  def: ResolvedProviderDefinition,
+  entry: ProviderSecret | undefined,
+): ProviderProblem | undefined {
+  // Checked on the URL it would really use: an override saved under older rules, or one that
+  // predates a change of wire API, must not slip through.
+  const urlProblem = baseURLProblem(entry?.baseURL ?? def.baseURL, def.api);
+  if (urlProblem) {
+    return {
+      cause: "base-url",
+      message: `${def.name} cannot be used: ${urlProblem} Change the base URL under "API Keys" in the panel.`,
+    };
+  }
+  if (def.auth === "none" || entry?.apiKey) return undefined;
+  const message = vault.error
+    ? `The Albireo vault could not be opened, so the ${def.name} API key is unavailable: ${vault.error}`
+    : vault.state === "locked"
+      ? `The Albireo vault is locked, so the ${def.name} API key is unavailable. Unlock it under "API Keys" in the panel.`
+      : `The ${def.name} API key is not configured in the Albireo vault. Add it under "API Keys" in the panel, or with \`albireo keys set ${def.id}\` and restart.`;
+  return { cause: "key", message };
 }
 
 /** Mask for display: first 3 and last 4 characters of keys long enough that this reveals little. */

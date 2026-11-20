@@ -91,14 +91,17 @@ export function maskBaseURL(value: string): string {
     return MASK;
   }
   const params = [...url.searchParams];
+  const hasUserInfo = Boolean(url.username || url.password);
   const hasHash = url.href.includes("#");
-  if (params.every(([name, v]) => isAllowedQueryParam(name, v)) && !url.username && !url.password && !hasHash) {
+  if (params.every(([name, v]) => isAllowedQueryParam(name, v)) && !hasUserInfo && !hasHash) {
     return value;
   }
   const query = params
     .map(([name, v]) => `${encodeURIComponent(name)}=${isAllowedQueryParam(name, v) ? encodeURIComponent(v) : MASK}`)
     .join("&");
-  return `${url.protocol}//${url.host}${url.pathname}${query ? `?${query}` : ""}${hasHash ? `#${MASK}` : ""}`;
+  // Masked rather than dropped, so the URL shown still explains why the registry refuses it.
+  const userInfo = hasUserInfo ? `${MASK}@` : "";
+  return `${url.protocol}//${userInfo}${url.host}${url.pathname}${query ? `?${query}` : ""}${hasHash ? `#${MASK}` : ""}`;
 }
 
 function isAllowedQueryParam(name: string, value: string): boolean {
