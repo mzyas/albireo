@@ -14,7 +14,7 @@ import {
   type ProviderHeaders,
   type WireApi,
 } from "@albireo/core";
-import { assertSafeBaseURL, isCredentialHeader } from "./credentials.js";
+import { isCredentialHeader, parseBaseURL } from "./credentials.js";
 import { VaultError } from "./errors.js";
 import { defaultVaultDir, writeFileAtomic } from "./fs.js";
 import {
@@ -57,9 +57,9 @@ export interface ProvidersFile {
 /** Something that follows the store's commits, e.g. `SecretManager` for its registry and session. */
 export interface ProviderConfigWatcher {
   /**
-   * A custom provider to keep defined even if the file drops it (the session's active one), so
-   * it is never unregistered while in use. Asked at every commit; the kept entry goes away at the
-   * first commit after another provider is named.
+   * A custom provider in use (the session's active one). It stays defined even if the file drops
+   * it, so it is never unregistered while in use, and `remove` refuses it. Asked at every commit;
+   * a kept entry goes away at the first commit after another provider is named.
    */
   keep?(): ProviderId | undefined;
   /** Called right after every commit that changed something, before anything else can run. */
@@ -191,8 +191,8 @@ export class ProviderConfigStore {
   }
 
   /** Custom providers kept defined by a watcher although `providers.json` no longer has them. */
-  get retained(): ProviderId[] {
-    return [...this.kept];
+  get retained(): ReadonlySet<ProviderId> {
+    return this.kept;
   }
 
   /** Register a watcher (see `ProviderConfigWatcher`). Returns a function that removes it. */
@@ -256,20 +256,25 @@ export class ProviderConfigStore {
   }
 
   /**
-   * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Either way
-   * the in-memory entries then match the file, apart from retained providers (which can include
-   * `id` itself, if it became active while the file was written).
+   * Remove an entry from `providers.json`. Returns true if the entry existed on disk. Refused for
+   * a provider in use (see `ProviderConfigWatcher.keep`), also when it comes into use while the
+   * file is being written: the file is then put back as it was, so nothing changes.
    */
   remove(id: ProviderId): Promise<boolean> {
     return this.exclusive(async () => {
       if (!isValidProviderId(id)) {
         throw new VaultError("invalid", `Invalid provider id: ${String(id)}.`);
       }
+      if (this.inUse().has(id)) throw inUseError(id);
       const current = await this.readForWrite();
       const existed = Object.hasOwn(current, id);
       const next: Record<string, ProviderConfigEntry> = { ...current };
       delete next[id];
       if (existed) await this.persist(next);
+      if (this.inUse().has(id)) {
+        if (existed) await this.persist(current);
+        throw inUseError(id);
+      }
       this.commit({ entries: next });
       return existed;
     });
@@ -288,54 +293,62 @@ export class ProviderConfigStore {
   }
 
   /**
-   * Make `snapshot` the in-memory state, keeping what watchers keep, then tell the watchers. All
-   * synchronous and called with nothing awaited after the read or write it follows, so the kept
-   * IDs are current and nothing can run between the commit and the watchers' updates.
+   * Make `snapshot` the in-memory state, keeping what is in use, then tell the watchers. All
+   * synchronous and called with nothing awaited after the read or write it follows, so what is in
+   * use is current and nothing can run between the commit and the watchers' updates.
    */
   private commit(snapshot: Snapshot): boolean {
-    const before = JSON.stringify(this.entries);
-    const beforeProblem = this.problem;
-    const beforeKept = [...this.kept].join();
-    const entries = snapshot.entries;
+    const entries = { ...snapshot.entries };
     const kept = new Set<ProviderId>();
-    for (const watcher of this.watchers) {
-      const id = watcher.keep?.();
-      if (id && !isBuiltinProviderId(id) && !Object.hasOwn(entries, id) && Object.hasOwn(this.entries, id)) {
+    for (const id of this.inUse()) {
+      if (!Object.hasOwn(entries, id) && Object.hasOwn(this.entries, id)) {
         entries[id] = this.entries[id] as ProviderConfigEntry;
         kept.add(id);
       }
     }
+    const changed =
+      JSON.stringify(entries) !== JSON.stringify(this.entries) ||
+      snapshot.problem !== this.problem ||
+      !sameMembers(kept, this.kept);
     this.entries = entries;
     this.problem = snapshot.problem;
     this.kept = kept;
-    const changed =
-      JSON.stringify(this.entries) !== before || this.problem !== beforeProblem || [...kept].join() !== beforeKept;
     if (changed) for (const watcher of this.watchers) watcher.committed?.();
     return changed;
   }
 
-  /** The entries that came from the file: memory without the retained ones. */
-  private fileEntries(): Record<string, ProviderConfigEntry> {
-    const out = structuredClone(this.entries);
-    for (const id of this.kept) delete out[id];
-    return out;
+  /** Custom providers the watchers have in use right now. */
+  private inUse(): Set<ProviderId> {
+    const ids = new Set<ProviderId>();
+    for (const watcher of this.watchers) {
+      const id = watcher.keep?.();
+      if (id && !isBuiltinProviderId(id)) ids.add(id);
+    }
+    return ids;
   }
 
-  /**
-   * The file's text, or null when it doesn't exist. Editors that save by renaming leave it
-   * missing for a moment, so a file that had entries is looked for once more before it counts
-   * as gone.
-   */
+  /** The entries that came from the file: memory without the retained ones. Entries are never mutated. */
+  private fileEntries(): Record<string, ProviderConfigEntry> {
+    return Object.fromEntries(Object.entries(this.entries).filter(([id]) => !this.kept.has(id)));
+  }
+
+  private hasFileEntries(): boolean {
+    return Object.keys(this.entries).some((id) => !this.kept.has(id));
+  }
+
+  /** The file's text, or null when it doesn't exist. */
   private async readText(): Promise<string | null> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await readFile(this.file, "utf8");
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-      }
-      if (attempt > 0 || Object.keys(this.fileEntries()).length === 0) return null;
-      await delay(MISSING_FILE_RECHECK_MS);
-    }
+    const text = await readIfExists(this.file);
+    if (text !== null || !this.hasFileEntries()) return text;
+    // Editors that save by renaming leave the file missing for a moment; look once more before
+    // treating a file that had entries as deleted.
+    await delay(MISSING_FILE_RECHECK_MS);
+    return readIfExists(this.file);
+  }
+
+  /** `error` text for a file that can't be parsed. */
+  private describe(err: unknown): string {
+    return err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
   }
 
   /**
@@ -357,8 +370,7 @@ export class ProviderConfigStore {
       const problem = errors.length > 0 ? `${errors.map((e) => e.message).join(" ")} (${this.file})` : undefined;
       return { entries: providers, problem };
     } catch (err) {
-      const problem = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
-      return { entries: this.fileEntries(), problem };
+      return { entries: this.fileEntries(), problem: this.describe(err) };
     }
   }
 
@@ -373,8 +385,10 @@ export class ProviderConfigStore {
     try {
       return parseProvidersFile(text).providers;
     } catch (err) {
-      const msg = err instanceof VaultError ? `${err.message} (${this.file})` : `Cannot parse ${this.file}.`;
-      throw new VaultError("corrupt", `Fix or remove ${this.file} before saving provider settings: ${msg}`);
+      throw new VaultError(
+        "corrupt",
+        `Fix or remove ${this.file} before saving provider settings: ${this.describe(err)}`,
+      );
     }
   }
 
@@ -382,6 +396,24 @@ export class ProviderConfigStore {
     const file: ProvidersFile = { providers };
     await writeFileAtomic(this.file, `${JSON.stringify(file, null, 2)}\n`);
   }
+}
+
+/** A file's text, or null if it doesn't exist. */
+async function readIfExists(file: string): Promise<string | null> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+function inUseError(id: ProviderId): VaultError {
+  return new VaultError("invalid", `Provider "${id}" is in use; switch to another provider before deleting it.`);
+}
+
+function sameMembers<T>(a: ReadonlySet<T>, b: ReadonlySet<T>): boolean {
+  return a.size === b.size && [...a].every((x) => b.has(x));
 }
 
 /** Strict parse: the first invalid entry fails the whole file. Used before writing it back. */
@@ -587,20 +619,7 @@ function validateText(v: unknown, label: string, max: number): string {
 
 function validateBaseURL(v: unknown, label: string, api: WireApi): string {
   const trimmed = validateText(v, label, 2048);
-  if (!trimmed) return "";
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    throw new VaultError("invalid", `${label} is not a valid URL.`);
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new VaultError("invalid", `${label} must start with http:// or https://.`);
-  }
-  if (url.username || url.password) {
-    throw new VaultError("invalid", `${label} must not embed credentials; put keys in the vault.`);
-  }
-  assertSafeBaseURL(url, label, api);
+  if (trimmed) parseBaseURL(trimmed, label, api);
   return trimmed;
 }
 

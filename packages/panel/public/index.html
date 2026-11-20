@@ -390,7 +390,7 @@ function buildProviderForm(id) {
   return entry;
 }
 
-function renderProviderForm(id, view, formsUsable, vaultLocked) {
+function renderProviderForm(id, view, formsUsable, needsUnlock) {
   let f = forms.get(id);
   if (!f) f = buildProviderForm(id);
   f.title.textContent = view.name === id ? id : `${view.name} (${id})`;
@@ -405,10 +405,10 @@ function renderProviderForm(id, view, formsUsable, vaultLocked) {
 
   f.del.hidden = view.builtin;
   const isActive = id === currentProvider;
-  f.del.disabled = isActive || vaultLocked;
+  f.del.disabled = isActive || needsUnlock;
   f.del.title = isActive
     ? "Switch to another provider before deleting"
-    : vaultLocked
+    : needsUnlock
       ? "Unlock the vault before deleting, so the stored key is deleted too"
       : `Delete custom provider ${id}`;
 
@@ -449,12 +449,8 @@ function syncCustomProviderFields() {
   $("cp-key-row").hidden = auth === "none" || !formsUsable;
   // The server refuses new providers until a passphrase vault is unlocked, like deletes.
   const submit = $("cp-submit");
-  submit.disabled = passphraseLocked(secrets);
+  submit.disabled = secrets?.needsUnlock === true;
   submit.title = submit.disabled ? "Unlock the vault before adding a provider" : "";
-}
-
-function passphraseLocked(s) {
-  return Boolean(s?.enabled && s.state === "locked" && !s.error);
 }
 
 function renderKeys() {
@@ -500,7 +496,7 @@ function renderKeys() {
   for (const id of order) {
     const view = s.providers[id];
     if (!view) continue;
-    const formEl = renderProviderForm(id, view, formsUsable, passphraseLocked(s));
+    const formEl = renderProviderForm(id, view, formsUsable, s.needsUnlock === true);
     if (formEl.parentElement !== container) container.appendChild(formEl);
   }
   syncCustomProviderFields();

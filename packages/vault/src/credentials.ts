@@ -17,12 +17,23 @@ const CREDENTIAL_WORDS =
 const CREDENTIAL_PARTS = new Set(["auth", "authn", "authz", "jwt", "key", "pwd", "sig"]);
 
 /**
- * Reject what a provider base URL must not carry: credentials or unknown parameters in the
- * query, and a fragment (it would swallow the request path). The Anthropic SDK appends the
- * request path after any `?`, so `anthropic-messages` endpoints take no query at all, not even
- * an empty one. `href` is checked because `search` and `hash` are empty for a bare `?` or `#`.
+ * The one set of rules for a provider base URL, wherever it comes from (`providers.json`, a vault
+ * override, or the combination a provider is about to be built with). Rejects anything but
+ * http(s), embedded user info, a fragment (it would swallow the request path), and query
+ * parameters other than version selectors (anything else may be a credential). The Anthropic SDK
+ * appends the request path after any `?`, so `anthropic-messages` endpoints take no query at all,
+ * not even an empty one; `href` is checked because `search` and `hash` are empty for a bare `?`
+ * or `#`. `api` is left out only where the wire API isn't known yet.
  */
-export function assertSafeBaseURL(url: URL, label: string, api?: WireApi): void {
+export function parseBaseURL(raw: string, label: string, api?: WireApi): URL {
+  if (!URL.canParse(raw)) throw new VaultError("invalid", `${label} is not a valid URL.`);
+  const url = new URL(raw);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new VaultError("invalid", `${label} must start with http:// or https://.`);
+  }
+  if (url.username || url.password) {
+    throw new VaultError("invalid", `${label} must not embed credentials; put keys in the vault.`);
+  }
   if (url.href.includes("#")) {
     throw new VaultError("invalid", `${label} must not have a fragment (#…).`);
   }
@@ -40,6 +51,7 @@ export function assertSafeBaseURL(url: URL, label: string, api?: WireApi): void 
       );
     }
   }
+  return url;
 }
 
 /**
@@ -49,12 +61,11 @@ export function assertSafeBaseURL(url: URL, label: string, api?: WireApi): void 
  */
 export function baseURLProblem(baseURL: string, api: WireApi): string | undefined {
   try {
-    const url = new URL(baseURL);
-    if (url.username || url.password) return "The base URL must not embed credentials.";
-    assertSafeBaseURL(url, "The base URL", api);
+    parseBaseURL(baseURL, "The base URL", api);
     return undefined;
   } catch (err) {
-    return err instanceof VaultError ? err.message : "The base URL is not a valid URL.";
+    if (err instanceof VaultError) return err.message;
+    throw err;
   }
 }
 

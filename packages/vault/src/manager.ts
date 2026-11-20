@@ -1,5 +1,5 @@
 import type { ProviderAuthMode, ProviderHeaders, ProviderRegistry, Session, WireApi } from "@albireo/core";
-import { assertSafeBaseURL, maskBaseURL } from "./credentials.js";
+import { maskBaseURL, parseBaseURL } from "./credentials.js";
 import type { Protection } from "./crypto.js";
 import { VaultError } from "./errors.js";
 import {
@@ -43,6 +43,11 @@ export interface SecretsStatus {
   keychain: string | null;
   /** Problem that keeps the vault from opening, if any. */
   error?: string;
+  /**
+   * True when the vault is locked and unlocking it would fix that (passphrase mode). Adding and
+   * deleting custom providers waits for it; a vault that can't be opened at all (`error`) doesn't.
+   */
+  needsUnlock: boolean;
   /** Problem reading `providers.json`, if any (built-ins remain available). */
   configError?: string;
   /** True while a change waits for the running turn to finish before the session picks it up. */
@@ -114,7 +119,7 @@ export class SecretManager {
         this.notify();
       }
       // A provider kept only because it was active can go once the session has moved on.
-      if (e.type === "provider_changed" && this.config?.retained.length) {
+      if (e.type === "provider_changed" && this.config?.retained.size) {
         this.reloadProviderConfig().catch(() => {});
       }
     });
@@ -136,7 +141,7 @@ export class SecretManager {
     const vault = this.vault;
     const secrets = vault.state === "unlocked" ? vault.read() : null;
     const active = this.session?.providerId;
-    const retained = active && this.config?.retained.includes(active) ? active : undefined;
+    const retained = active && this.config?.retained.has(active) ? active : undefined;
     const configError = [
       retained
         ? `Active provider "${retained}" is no longer in providers.json; it stays available until you switch to another provider.`
@@ -179,6 +184,7 @@ export class SecretManager {
       protection: vault.protection,
       keychain: vault.keychainLabel,
       ...(vault.error ? { error: vault.error } : {}),
+      needsUnlock: this.needsUnlock(),
       ...(configError ? { configError } : {}),
       refreshPending: this.pendingRefresh,
       providerOrder,
@@ -218,12 +224,8 @@ export class SecretManager {
         throw new VaultError("invalid", `${field} must be a string.`);
       }
     }
-    if (typeof body.baseURL === "string" && body.baseURL.trim()) {
-      const api = this.definitions().find((d) => d.id === body.provider)?.api;
-      const url = URL.canParse(body.baseURL.trim()) ? new URL(body.baseURL.trim()) : undefined;
-      // The vault checks the rest; only the wire API decides whether a query string works at all.
-      if (url) assertSafeBaseURL(url, "The base URL", api);
-    }
+    const baseURL = typeof body.baseURL === "string" ? body.baseURL.trim() : "";
+    if (baseURL) parseBaseURL(baseURL, "The base URL", this.definitions().find((d) => d.id === body.provider)?.api);
     if (this.vault.state === "uninitialized") await this.vault.initialize();
     await this.vault.updateProvider(body.provider, {
       apiKey: body.apiKey as string | undefined,
@@ -257,9 +259,11 @@ export class SecretManager {
   }
 
   /**
-   * Remove a custom provider from `providers.json` together with its vault entry. The entry goes
-   * first: if the file can't be written, nothing is lost. A key that outlives it (the vault could
-   * not be opened, or its write failed) is cleared when a provider is added under the same ID.
+   * Remove a custom provider from `providers.json` together with its vault entry. Fails while the
+   * provider is in use, including when the session switches to it during the delete (the config
+   * store then puts the file back). The entry goes first: if the file can't be written, nothing is
+   * lost. A key that outlives it (the vault could not be opened, or its write failed) is cleared
+   * when a provider is added under the same ID.
    */
   async deleteCustomProvider(id: unknown): Promise<SecretsStatus> {
     const config = this.requireConfig();
@@ -272,16 +276,13 @@ export class SecretManager {
     if (!config.has(id)) {
       throw new VaultError("invalid", `Unknown provider "${id}".`);
     }
-    if (this.session?.providerId === id) {
-      throw new VaultError("invalid", `Cannot delete active provider "${id}". Switch to another provider first.`);
-    }
-    if (this.passphraseLocked()) {
+    if (this.needsUnlock()) {
       throw new VaultError("locked", `Unlock the vault before deleting "${id}", so its stored key is deleted too.`);
     }
+    // Refused if the provider is (or comes) in use. Once it resolves, the provider is unregistered,
+    // so nothing can switch to it while its key is deleted.
     await config.remove(id);
-    // Once the removal committed, the provider was unregistered, so nothing can switch to it any
-    // more. If a switch landed while the file was being written, it is kept, and so is its key.
-    if (!config.has(id) && this.vault.state === "unlocked") await this.vault.deleteProvider(id);
+    if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);
     return this.status();
   }
 
@@ -300,7 +301,7 @@ export class SecretManager {
    * can't be opened at all (`vault.error`) holds nothing usable, so it doesn't block the add.
    */
   private async clearLeftovers(id: ProviderId): Promise<void> {
-    if (this.passphraseLocked()) {
+    if (this.needsUnlock()) {
       throw new VaultError(
         "locked",
         `Unlock the vault before adding "${id}", so anything stored under that ID before can be cleared.`,
@@ -310,7 +311,7 @@ export class SecretManager {
   }
 
   /** Locked in a way the user can fix by unlocking, as opposed to a vault that can't be opened. */
-  private passphraseLocked(): boolean {
+  private needsUnlock(): boolean {
     return this.vault.state === "locked" && !this.vault.error;
   }
 
@@ -337,13 +338,8 @@ export class SecretManager {
       return;
     }
     this.pendingRefresh = false;
-    try {
-      session.refreshProvider();
-    } catch {
-      // The active provider is always registered (see the config watcher), so this should not
-      // happen; if it does, the session keeps its current provider instance rather than the
-      // caller's request failing after its change was saved.
-    }
+    // Never throws for an unknown provider: the config watcher keeps the active one registered.
+    session.refreshProvider();
   }
 
   private notify(): void {

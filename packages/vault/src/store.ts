@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { assertSafeBaseURL } from "./credentials.js";
+import { parseBaseURL } from "./credentials.js";
 import {
   deriveFromMasterKey,
   deriveFromPassphrase,
@@ -404,19 +404,8 @@ function validatePatch(patch: ProviderPatch): ProviderPatch {
   const apiKey = str("apiKey", 4096);
   if (apiKey && /\s/.test(apiKey)) throw new VaultError("invalid", "The API key must not contain whitespace.");
   const baseURL = str("baseURL", 2048);
-  if (baseURL) {
-    let url: URL;
-    try {
-      url = new URL(baseURL);
-    } catch {
-      throw new VaultError("invalid", "The base URL is not a valid URL.");
-    }
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
-      throw new VaultError("invalid", "The base URL must start with http:// or https://.");
-    }
-    if (url.username || url.password) throw new VaultError("invalid", "Put credentials in the API key, not the URL.");
-    assertSafeBaseURL(url, "The base URL");
-  }
+  // The wire API isn't known here; `SecretManager.setProvider` checks the URL against it first.
+  if (baseURL) parseBaseURL(baseURL, "The base URL");
   const model = str("model", 200);
   if (p.clearApiKey !== undefined && typeof p.clearApiKey !== "boolean") {
     throw new VaultError("invalid", "clearApiKey must be a boolean.");
