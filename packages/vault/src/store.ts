@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseBaseURL } from "./credentials.js";
 import {
@@ -150,6 +150,17 @@ export class VaultStore {
   /** Copy of the decrypted secrets. */
   read(): VaultSecrets {
     return structuredClone(this.requireUnlocked());
+  }
+
+  /** Whether `vault.enc.json` exists on disk right now. */
+  async existsOnDisk(): Promise<boolean> {
+    try {
+      await stat(this.file);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new VaultError("unavailable", `Cannot check ${this.file}.`);
+    }
   }
 
   /**

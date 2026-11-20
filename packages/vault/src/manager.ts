@@ -95,6 +95,7 @@ export class SecretManager {
   private session?: Session;
   private offSession?: () => void;
   private pendingRefresh = false;
+  private changeSeq = 0;
   private listeners = new Set<() => void>();
   private unwatch?: () => void;
 
@@ -260,7 +261,23 @@ export class SecretManager {
         `Invalid provider id: ${String(id)}. Use lowercase letters, digits, '.', '_' or '-'.`,
       );
     }
-    await config.upsert(id, entry as ProviderConfigEntry, { beforeCreate: () => this.clearLeftovers(id) });
+    let vaultTouched = false;
+    let seqAfterClear = 0;
+    try {
+      await config.upsert(id, entry as ProviderConfigEntry, {
+        beforeCreate: async () => {
+          try {
+            await this.clearLeftovers(id, () => {
+              vaultTouched = true;
+            });
+          } finally {
+            seqAfterClear = this.changeSeq;
+          }
+        },
+      });
+    } finally {
+      if (vaultTouched && this.changeSeq === seqAfterClear) this.changed();
+    }
     return this.status();
   }
 
@@ -285,10 +302,22 @@ export class SecretManager {
     if (this.needsUnlock()) {
       throw new VaultError("locked", `Unlock the vault before deleting "${id}", so its stored key is deleted too.`);
     }
+    if (this.vault.state === "uninitialized" && (await this.vault.existsOnDisk())) {
+      throw new VaultError(
+        "unavailable",
+        `Another Albireo process created the vault meanwhile; restart before deleting "${id}", so its stored key is deleted too.`,
+      );
+    }
     // Refused if the provider is (or comes) in use. Once it resolves, the provider is unregistered,
     // so nothing can switch to it while its key is deleted.
     await config.remove(id);
-    if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);
+    if (this.vault.state === "unlocked") {
+      try {
+        await this.vault.deleteProvider(id);
+      } finally {
+        this.changed();
+      }
+    }
     return this.status();
   }
 
@@ -307,7 +336,7 @@ export class SecretManager {
    * an earlier provider with the same ID left in the vault. Refused while the vault can't be read:
    * a leftover would come back with the new provider once it can.
    */
-  private async clearLeftovers(id: ProviderId): Promise<void> {
+  private async clearLeftovers(id: ProviderId, onTouch?: () => void): Promise<void> {
     if (this.needsUnlock()) {
       throw new VaultError(
         "locked",
@@ -320,7 +349,16 @@ export class SecretManager {
         `Fix the Albireo vault before adding "${id}": while it can't be opened, a key stored under that ID before can't be cleared. ${this.vault.error}`,
       );
     }
-    if (this.vault.state === "unlocked") await this.vault.deleteProvider(id);
+    if (this.vault.state === "uninitialized" && (await this.vault.existsOnDisk())) {
+      throw new VaultError(
+        "unavailable",
+        `Another Albireo process created the vault meanwhile; restart before adding "${id}", so anything stored under that ID before can be cleared.`,
+      );
+    }
+    if (this.vault.state === "unlocked") {
+      onTouch?.();
+      await this.vault.deleteProvider(id);
+    }
   }
 
   /** Locked in a way the user can fix by unlocking, as opposed to a vault that can't be opened. */
@@ -338,6 +376,7 @@ export class SecretManager {
   }
 
   private changed(): void {
+    this.changeSeq++;
     registerVaultProviders(this.registry, this.vault, this.factories, this.config);
     this.refreshSession();
     this.notify();

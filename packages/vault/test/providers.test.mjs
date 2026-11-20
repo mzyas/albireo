@@ -987,3 +987,100 @@ test("one invalid entry in providers.json does not hide the others", () =>
     assert.match(config.error, /must start with http/);
     assert.equal(config.get("ollama").baseURL, local.baseURL);
   }));
+
+test("re-adding a removed provider with the same definition updates registry, session, and listeners", () =>
+  withDir(async (dir) => {
+    const entry = { api: "openai-completions", baseURL: "https://gw.example/v1", defaultModel: "q" };
+    const stores = await openStores(dir, { providers: { gw: entry }, keys: { gw: { apiKey: KEY } } });
+    const session = sessionOn(stores.registry, "gw", dir);
+    const manager = new SecretManager({ ...stores, session });
+    let notifications = 0;
+    manager.onChange(() => {
+      notifications++;
+    });
+
+    try {
+      await writeFile(stores.config.file, JSON.stringify({ providers: {} }));
+      const readded = await manager.upsertProviderConfig({ id: "gw", ...entry });
+      assert.equal(readded.providers.gw.hasKey, false);
+      assert.equal(readded.providers.gw.configured, false);
+      assert.equal(notifications, 1);
+      assert.ok(stores.registry.get("gw") instanceof UnconfiguredProvider);
+      assert.equal(stores.vault.read().providers.gw, undefined);
+
+      // Even if writing providers.json fails after beforeCreate cleared the vault, registry/session stay in sync.
+      await manager.setProvider({ provider: "gw", apiKey: KEY });
+      assert.ok(!(stores.registry.get("gw") instanceof UnconfiguredProvider));
+      await writeFile(stores.config.file, JSON.stringify({ providers: {} }));
+      stores.config.persist = async () => {
+        throw new Error("disk full");
+      };
+      try {
+        await assert.rejects(manager.upsertProviderConfig({ id: "gw", ...entry }), /disk full/);
+      } finally {
+        delete stores.config.persist;
+      }
+      assert.ok(stores.registry.get("gw") instanceof UnconfiguredProvider);
+      assert.equal(notifications, 3);
+    } finally {
+      manager.dispose();
+    }
+  }));
+
+test("deleting a custom provider re-syncs registry with vault updates picked up from another process", () =>
+  withDir(async (dir) => {
+    const protector = new MemoryKeyProtector();
+    await writeFile(path.join(dir, PROVIDERS_FILE), JSON.stringify({ providers: { foo: local, bar: local } }));
+    const config = await ProviderConfigStore.open({ dir });
+    const vault = await VaultStore.open({ dir, protector });
+    await vault.initialize();
+    await vault.updateProvider("foo", { apiKey: KEY });
+    const registry = createVaultRegistry(vault, {}, config);
+    const manager = new SecretManager({ vault, registry, config });
+
+    try {
+      assert.ok(registry.get("openai") instanceof UnconfiguredProvider);
+
+      const other = await VaultStore.open({ dir, protector });
+      await other.updateProvider("openai", { apiKey: KEY });
+
+      const afterSet = await manager.deleteCustomProvider("foo");
+      assert.equal(afterSet.providers.openai.configured, true);
+      assert.ok(!(registry.get("openai") instanceof UnconfiguredProvider));
+
+      await other.updateProvider("openai", { clearApiKey: true });
+
+      const afterClear = await manager.deleteCustomProvider("bar");
+      assert.equal(afterClear.providers.openai.configured, false);
+      assert.ok(registry.get("openai") instanceof UnconfiguredProvider);
+    } finally {
+      manager.dispose();
+    }
+  }));
+
+test("adding or deleting a custom provider is refused when another process created the vault meanwhile", () =>
+  withDir(async (dir) => {
+    const entry = { api: "openai-completions", baseURL: "https://gw.example/v1", defaultModel: "q" };
+    await writeFile(path.join(dir, PROVIDERS_FILE), JSON.stringify({ providers: { gw: entry } }));
+    const protector = new MemoryKeyProtector();
+    const config = await ProviderConfigStore.open({ dir });
+    const vault = await VaultStore.open({ dir, protector });
+    const registry = createVaultRegistry(vault, {}, config);
+    const manager = new SecretManager({ vault, registry, config });
+
+    try {
+      const other = await VaultStore.open({ dir, protector });
+      await other.initialize();
+      await other.updateProvider("gw", { apiKey: KEY });
+
+      await assert.rejects(manager.deleteCustomProvider("gw"), isVaultError("unavailable"));
+      assert.equal(config.has("gw"), true);
+
+      await writeFile(config.file, JSON.stringify({ providers: {} }));
+      await assert.rejects(manager.upsertProviderConfig({ id: "gw", ...entry }), isVaultError("unavailable"));
+      const onDisk = JSON.parse(await readFile(config.file, "utf8"));
+      assert.equal(onDisk.providers.gw, undefined);
+    } finally {
+      manager.dispose();
+    }
+  }));
