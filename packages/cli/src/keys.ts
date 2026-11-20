@@ -29,9 +29,8 @@ Usage:
 The key is never taken as an argument, which would leave it in shell history and the
 process list: \`set\` asks for it without echo, or reads it from stdin when stdin is not
 a terminal (albireo keys set openai < key.txt). A passphrase-protected vault needs a
-terminal to enter the passphrase. \`status\` re-reads providers.json for this process only;
-it does not reload an already-running kernel. Keys written by \`set\` / \`clear\` are also
-picked up by that kernel only after a restart.
+terminal to enter the passphrase. A kernel that is already running picks up changes
+after a restart.
 `;
 
 /** Everything the command touches outside the vault, so tests can drive it. */
@@ -153,7 +152,6 @@ async function status(manager: SecretManager, io: KeysIO): Promise<number> {
   if (vault.state === "locked" && vault.protection === "passphrase" && !vault.error && io.interactive) {
     await unlock(manager, io);
   }
-  await manager.reloadProviderConfig();
   io.stdout(formatStatus(manager.status(), vault.file));
   return 0;
 }

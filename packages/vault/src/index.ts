@@ -27,6 +27,7 @@ export {
   type ProviderConfigEntry,
   ProviderConfigStore,
   type ProviderConfigStoreOptions,
+  type ProviderConfigWatcher,
   type ProviderModelConfig,
   type ProvidersFile,
   parseProvidersFile,

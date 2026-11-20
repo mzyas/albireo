@@ -167,7 +167,7 @@
         <label for="cp-key">API key (optional — saved encrypted in vault)</label>
         <input id="cp-key" type="password" placeholder="leave blank to set later" autocomplete="off" spellcheck="false">
       </div>
-      <div class="actions"><button type="submit" class="primary">Save custom provider</button></div>
+      <div class="actions"><button id="cp-submit" type="submit" class="primary">Save custom provider</button></div>
     </form>
   </details>
   <div class="actions"><button id="lock-btn" type="button" hidden>Lock vault</button></div>
@@ -447,6 +447,14 @@ function syncCustomProviderFields() {
   );
   const auth = $("cp-auth").value;
   $("cp-key-row").hidden = auth === "none" || !formsUsable;
+  // The server refuses new providers until a passphrase vault is unlocked, like deletes.
+  const submit = $("cp-submit");
+  submit.disabled = passphraseLocked(secrets);
+  submit.title = submit.disabled ? "Unlock the vault before adding a provider" : "";
+}
+
+function passphraseLocked(s) {
+  return Boolean(s?.enabled && s.state === "locked" && !s.error);
 }
 
 function renderKeys() {
@@ -492,7 +500,7 @@ function renderKeys() {
   for (const id of order) {
     const view = s.providers[id];
     if (!view) continue;
-    const formEl = renderProviderForm(id, view, formsUsable, s.state === "locked");
+    const formEl = renderProviderForm(id, view, formsUsable, passphraseLocked(s));
     if (formEl.parentElement !== container) container.appendChild(formEl);
   }
   syncCustomProviderFields();
@@ -572,20 +580,29 @@ $("custom-provider-form").onsubmit = async (e) => {
     ...(modelIds.length > 0 ? { models: modelIds.map((m) => ({ id: m })) } : {}),
     compat,
   };
-  // The server saves the key before the entry, so a key it rejects leaves nothing to undo.
   const initialKey = $("cp-key").value.trim();
-  if (auth !== "none" && initialKey) payload.apiKey = initialKey;
   keysMsg("Saving custom provider…");
   try {
     secrets = await api("/providers", payload);
-    $("custom-provider-form").reset();
-    $("cp-key").value = "";
-    $("custom-provider-box").open = false;
-    renderKeys();
-    keysMsg(`Saved custom provider "${id}".`);
   } catch (err) {
     keysMsg(err.message, true);
+    return;
   }
+  $("custom-provider-form").reset();
+  $("cp-key").value = "";
+  $("custom-provider-box").open = false;
+  renderKeys();
+  // The provider is saved either way; a key that fails can be entered in its own form.
+  if (auth !== "none" && initialKey) {
+    try {
+      secrets = await api("/secrets/provider", { provider: id, apiKey: initialKey });
+      renderKeys();
+    } catch (err) {
+      keysMsg(`Saved custom provider "${id}", but not its key: ${err.message}`, true);
+      return;
+    }
+  }
+  keysMsg(`Saved custom provider "${id}".`);
 };
 
 $("keys-open").onclick = () => { keysMsg(""); renderKeys(); $("keys").showModal(); loadSecrets(); };

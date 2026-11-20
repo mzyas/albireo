@@ -17,11 +17,16 @@ const CREDENTIAL_WORDS =
 const CREDENTIAL_PARTS = new Set(["auth", "authn", "authz", "jwt", "key", "pwd", "sig"]);
 
 /**
- * Reject credentials and unknown parameters in a provider base URL's query string. The Anthropic
- * SDK appends the request path after the query, so `anthropic-messages` endpoints take none at all.
+ * Reject what a provider base URL must not carry: credentials or unknown parameters in the
+ * query, and a fragment (it would swallow the request path). The Anthropic SDK appends the
+ * request path after any `?`, so `anthropic-messages` endpoints take no query at all, not even
+ * an empty one. `href` is checked because `search` and `hash` are empty for a bare `?` or `#`.
  */
-export function assertSafeBaseURLQuery(url: URL, label: string, api?: WireApi): void {
-  if (url.search && api === ANTHROPIC_MESSAGES_API) {
+export function assertSafeBaseURL(url: URL, label: string, api?: WireApi): void {
+  if (url.href.includes("#")) {
+    throw new VaultError("invalid", `${label} must not have a fragment (#…).`);
+  }
+  if (api === ANTHROPIC_MESSAGES_API && url.href.includes("?")) {
     throw new VaultError(
       "invalid",
       `${label} must not have a query string for an ${ANTHROPIC_MESSAGES_API} provider: the request path would end up inside it.`,
@@ -37,6 +42,22 @@ export function assertSafeBaseURLQuery(url: URL, label: string, api?: WireApi): 
   }
 }
 
+/**
+ * Why the base URL a provider would be built with can't be used, or undefined if it can. Run on
+ * the combined result (vault override or definition), so a value saved under older rules or a
+ * changed wire API can't slip through.
+ */
+export function baseURLProblem(baseURL: string, api: WireApi): string | undefined {
+  try {
+    const url = new URL(baseURL);
+    if (url.username || url.password) return "The base URL must not embed credentials.";
+    assertSafeBaseURL(url, "The base URL", api);
+    return undefined;
+  } catch (err) {
+    return err instanceof VaultError ? err.message : "The base URL is not a valid URL.";
+  }
+}
+
 /** Whether a header name looks like it carries a credential. `null` (suppression) is handled by the caller. */
 export function isCredentialHeader(name: string): boolean {
   const lower = name.toLowerCase();
@@ -47,8 +68,9 @@ export function isCredentialHeader(name: string): boolean {
 }
 
 /**
- * A base URL for display: query values other than allowed version selectors are masked. New
- * URLs can't hold them, but an override saved before that check existed may.
+ * A base URL for display: query values other than allowed version selectors, embedded user info
+ * and any fragment are masked. New URLs can't hold them, but an override saved before those
+ * checks existed may.
  */
 export function maskBaseURL(value: string): string {
   let url: URL;
@@ -58,11 +80,14 @@ export function maskBaseURL(value: string): string {
     return MASK;
   }
   const params = [...url.searchParams];
-  if (params.every(([name, v]) => isAllowedQueryParam(name, v)) && !url.username && !url.password) return value;
+  const hasHash = url.href.includes("#");
+  if (params.every(([name, v]) => isAllowedQueryParam(name, v)) && !url.username && !url.password && !hasHash) {
+    return value;
+  }
   const query = params
     .map(([name, v]) => `${encodeURIComponent(name)}=${isAllowedQueryParam(name, v) ? encodeURIComponent(v) : MASK}`)
     .join("&");
-  return `${url.protocol}//${url.host}${url.pathname}${query ? `?${query}` : ""}`;
+  return `${url.protocol}//${url.host}${url.pathname}${query ? `?${query}` : ""}${hasHash ? `#${MASK}` : ""}`;
 }
 
 function isAllowedQueryParam(name: string, value: string): boolean {

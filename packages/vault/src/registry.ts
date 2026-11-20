@@ -15,6 +15,7 @@ import {
   type TurnResult,
   type WireApi,
 } from "@albireo/core";
+import { baseURLProblem } from "./credentials.js";
 import {
   defaultProviderDefinitions,
   type ProviderCompat,
@@ -77,6 +78,14 @@ export function registerVaultProviders(
     const entry = secrets?.providers[def.id];
     const baseURL = entry?.baseURL ?? def.baseURL;
     const model = entry?.model ?? def.defaultModel;
+
+    // An override saved under older rules, or one that predates a change of wire API.
+    const urlProblem = baseURLProblem(baseURL, def.api);
+    if (urlProblem) {
+      const reason = `${def.name} cannot be used: ${urlProblem} Change the base URL under "API Keys" in the panel.`;
+      registry.register(def.id, () => new UnconfiguredProvider(def.id, model, reason));
+      continue;
+    }
 
     if (def.auth !== "none" && !entry?.apiKey) {
       const reason = vault.error
