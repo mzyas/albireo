@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { z } from "zod";
 import type { ProviderRegistry } from "./providers/index.js";
+import { eventsFromHistory } from "./replay.js";
 import { type AnyTool, type Risk, toSpec } from "./tool.js";
 import type { ContentPart, Message, Provider, StopReason, ToolSpec, TurnResult, Usage } from "./types.js";
 
@@ -34,6 +35,11 @@ export interface SessionOptions {
   /** Risk levels executed without asking. Default: ["read"]. */
   autoApprove?: Risk[];
   maxSteps?: number;
+  /**
+   * Messages of an earlier conversation to continue (from a store). They become `history`, and
+   * `snapshot()` shows them as events rebuilt by `eventsFromHistory`. Not reported to `onMessage`.
+   */
+  history?: Message[];
 }
 
 export interface Snapshot {
@@ -53,6 +59,7 @@ export class Session {
   readonly history: Message[] = [];
   private log: LoggedEvent[] = [];
   private bus = new EventEmitter();
+  private messageListeners = new Set<(message: Message) => void>();
   private seq = 0;
   private running = false;
   private abortCtl?: AbortController;
@@ -85,6 +92,13 @@ export class Session {
       opts.system ??
       `You are Albireo, a careful coding agent working in ${opts.cwd} (platform: ${process.platform}). ` +
         `Use the provided tools to inspect and change files. Be concise.`;
+
+    if (opts.history?.length) {
+      this.history.push(...opts.history);
+      for (const e of eventsFromHistory(this.history, (name) => this.toolMap.get(name)?.risk ?? "unknown")) {
+        this.append(e);
+      }
+    }
   }
 
   get providerId(): string {
@@ -100,6 +114,16 @@ export class Session {
   on(listener: (e: LoggedEvent) => void): () => void {
     this.bus.on("event", listener);
     return () => this.bus.off("event", listener);
+  }
+
+  /**
+   * Called with every message once it has been added to `history`: the user's message, each assistant
+   * message, and each batch of tool results. `history` only ever grows, so a store can append what it
+   * hears here. A listener that throws is ignored; it must not break the agent loop.
+   */
+  onMessage(listener: (message: Message) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
   snapshot(): Snapshot {
@@ -153,7 +177,7 @@ export class Session {
     this.abortCtl = new AbortController();
     const signal = this.abortCtl.signal;
     this.emit({ type: "status", state: "running" });
-    this.history.push({ role: "user", content: [{ type: "text", text }] });
+    this.commit({ role: "user", content: [{ type: "text", text }] });
     this.emit({ type: "user", text });
 
     try {
@@ -193,7 +217,7 @@ export class Session {
           ...res.message,
           meta: { provider: provider.id, model, stopReason: res.stopReason, usage: res.usage, at: Date.now() },
         };
-        this.history.push(message);
+        this.commit(message);
 
         const calls = message.content.filter(
           (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
@@ -216,7 +240,7 @@ export class Session {
             results.push(await this.runCall(call, signal));
           }
         }
-        this.history.push({ role: "user", content: results });
+        this.commit({ role: "user", content: results });
         if (signal.aborted) {
           this.emit({ type: "notice", text: "Aborted." });
           break;
@@ -283,12 +307,29 @@ export class Session {
     });
   }
 
-  private emit(e: KernelEvent): void {
+  /** The only place messages enter `history` during a turn, so `onMessage` hears all of them. */
+  private commit(message: Message): void {
+    this.history.push(message);
+    for (const listener of this.messageListeners) {
+      try {
+        listener(message);
+      } catch {
+        // A broken listener (a store that can't write) must not stop the conversation.
+      }
+    }
+  }
+
+  /** Numbers the event and keeps it in the log (unless it is a transient delta); does not notify anyone. */
+  private append(e: KernelEvent): LoggedEvent {
     const logged = { ...e, seq: ++this.seq } as LoggedEvent;
     if (!TRANSIENT.has(e.type)) {
       this.log.push(logged);
       if (this.log.length > MAX_LOG) this.log.shift();
     }
-    this.bus.emit("event", logged);
+    return logged;
+  }
+
+  private emit(e: KernelEvent): void {
+    this.bus.emit("event", this.append(e));
   }
 }
