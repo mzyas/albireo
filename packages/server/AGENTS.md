@@ -4,7 +4,7 @@
 
 ## 协议
 
-- `GET /`：返回面板的 `index.html`（默认来自同级的 `packages/panel/public/`，可以用 `opts.publicDir` 覆盖）。
+- `GET /`：返回面板构建出的单文件 `index.html`（默认来自同级的 `packages/panel/dist/`，可以用 `opts.publicDir` 覆盖）。还没构建时返回 503 和提示，不暴露本地路径。**没有静态资源路由**：面板把脚本和样式都内联进这一个文件，这样每个请求都只需要过同一套 token 检查（`<script src>` 带不了请求头）。
 - `GET /events`：SSE。先发一条 `{ type: "snapshot", ... }`，之后转发 `Session` 的每个事件。订阅和取快照在同一个 tick 里完成，所以事件不会漏也不会重复。
 - `POST /command`：JSON body，`type` 取 `send | approve | abort | switch`，成功时返回 202。可用命令以源码里的 `switch` 为准。
 - `/secrets`（`GET`）、`/secrets/{unlock,provider,lock}`（`POST`）以及 `/providers`（`POST`）、`/providers/:id`（`DELETE`）：管理加密 vault 与 `providers.json` 自定义 provider，全部交给 `opts.secrets`（`@albireo/vault` 的 `SecretManager`）处理；没传时 `GET /secrets` 返回 `{ enabled: false }`。请求和响应的字段以 `SecretManager` 的类型为准，错误码映射见 `VAULT_STATUS`。
@@ -25,4 +25,4 @@ Agent 能执行任意命令，所以这个服务必须锁死：
 
 ## 测试
 
-`test/*.test.mjs`：`node --test`，起真实服务、用 `MemoryKeyProtector` 的临时 vault，覆盖 token / Host 校验和 `/secrets` 不泄漏明文。改协议时，记得同步修改 `packages/panel/public/index.html` 里的调用方。
+`test/*.test.mjs`：`node --test`，起真实服务。`secrets.test.mjs` 用 `MemoryKeyProtector` 的临时 vault，覆盖 token / Host 校验和 `/secrets` 不泄漏明文；`panel.test.mjs` 覆盖 `GET /` 的鉴权、单文件服务和未构建时的 503。改协议时，同步修改 `packages/panel/src/protocol.ts` 和用到它的组件（面板以类型导入依赖 core 和 vault，类型对不上时 `pnpm build` 会报错）。

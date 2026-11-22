@@ -8,7 +8,7 @@ import { type SecretManager, VaultError, type VaultErrorCode } from "@albireo/va
 export interface PanelServerOptions {
   /** 0 (default) picks a free port. */
   port?: number;
-  /** Directory holding index.html. Defaults to the sibling @albireo/panel package. */
+  /** Directory holding the built index.html. Defaults to the sibling @albireo/panel package's `dist/`. */
   publicDir?: URL;
   /** Enables the /secrets routes. Without it, GET /secrets answers `{ enabled: false }`. */
   secrets?: SecretManager;
@@ -137,7 +137,7 @@ async function handleSecrets(
  */
 export async function startPanelServer(session: Session, opts: PanelServerOptions = {}): Promise<PanelServer> {
   const token = randomBytes(24).toString("hex");
-  const publicDir = opts.publicDir ?? new URL("../../panel/public/", import.meta.url);
+  const publicDir = opts.publicDir ?? new URL("../../panel/dist/", import.meta.url);
   let port = 0;
   // Vault changes aren't session events; tell every connected panel to re-fetch GET /secrets.
   const streams = new Set<http.ServerResponse>();
@@ -160,7 +160,16 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
       }
 
       if (req.method === "GET" && url.pathname === "/") {
-        const html = await readFile(new URL("index.html", publicDir), "utf8");
+        let html: string;
+        try {
+          html = await readFile(new URL("index.html", publicDir), "utf8");
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          res
+            .writeHead(503, { "content-type": "text/plain; charset=utf-8" })
+            .end("The panel has not been built. Run `pnpm build` and reload.");
+          return;
+        }
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(html);
         return;
       }
