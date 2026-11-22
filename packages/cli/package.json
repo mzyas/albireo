@@ -12,6 +12,7 @@
   "dependencies": {
     "@albireo/core": "workspace:*",
     "@albireo/server": "workspace:*",
+    "@albireo/store": "workspace:*",
     "@albireo/vault": "workspace:*"
   }
 }

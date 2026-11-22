@@ -184,6 +184,9 @@ importers:
       '@albireo/server':
         specifier: workspace:*
         version: link:../server
+      '@albireo/store':
+        specifier: workspace:*
+        version: link:../store
       '@albireo/vault':
         specifier: workspace:*
         version: link:../vault
@@ -236,6 +239,12 @@ importers:
       '@albireo/vault':
         specifier: workspace:*
         version: link:../vault
+
+  packages/store:
+    dependencies:
+      '@albireo/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/vault:
     dependencies:
