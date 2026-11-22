@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { builtinTools, type Risk, Session } from "@albireo/core";
+import { builtinTools, loadInstructions, type Risk, Session } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
 import {
   createVaultRegistry,
@@ -96,6 +96,7 @@ if (values.prompt !== undefined) {
   if (problem) fail(problem.message);
 }
 
+const cwd = path.resolve(values.cwd ?? process.cwd());
 let session: Session;
 try {
   session = new Session({
@@ -103,7 +104,8 @@ try {
     provider: values.provider,
     model: values.model,
     tools: builtinTools,
-    cwd: path.resolve(values.cwd ?? process.cwd()),
+    cwd,
+    instructions: await loadInstructions(cwd),
     autoApprove,
   });
 } catch (err) {

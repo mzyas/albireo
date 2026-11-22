@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { z } from "zod";
+import { type InstructionFile, type InstructionInfo, withInstructions } from "./instructions.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { type AnyTool, type Risk, toSpec } from "./tool.js";
 import type { ContentPart, Message, Provider, StopReason, ToolSpec, TurnResult, Usage } from "./types.js";
@@ -15,7 +16,8 @@ export type KernelEvent =
   | { type: "approval_resolved"; id: string; allow: boolean }
   | { type: "tool_result"; id: string; name: string; content: string; isError: boolean }
   | { type: "provider_changed"; provider: string; model: string }
-  | { type: "status"; state: "idle" | "running" }
+  /** `canRetry` is set when the session goes idle: see `Session.canRetry`. */
+  | { type: "status"; state: "idle" | "running"; canRetry?: boolean }
   | { type: "notice"; text: string }
   | { type: "error"; message: string };
 
@@ -31,6 +33,8 @@ export interface SessionOptions {
   tools: AnyTool[];
   cwd: string;
   system?: string;
+  /** Workspace instruction files (see `loadInstructions`), appended to the system prompt. */
+  instructions?: InstructionFile[];
   /** Risk levels executed without asking. Default: ["read"]. */
   autoApprove?: Risk[];
   maxSteps?: number;
@@ -44,6 +48,11 @@ export interface Snapshot {
   model: string;
   providers: string[];
   pending: Extract<KernelEvent, { type: "approval_request" }>[];
+  /** The workspace root the tools work in. */
+  cwd: string;
+  /** Instruction files in the system prompt (names and sizes only). */
+  instructions: InstructionInfo[];
+  canRetry: boolean;
 }
 
 const MAX_LOG = 5000;
@@ -64,6 +73,7 @@ export class Session {
   private autoApprove: Set<Risk>;
   private maxSteps: number;
   private system: string;
+  readonly instructions: InstructionInfo[];
   private registry: ProviderRegistry;
   private provider: Provider;
   private _model: string;
@@ -81,10 +91,14 @@ export class Session {
     this.autoApprove = new Set(opts.autoApprove ?? ["read"]);
     this.maxSteps = opts.maxSteps ?? 30;
     this.cwd = opts.cwd;
-    this.system =
+    const instructions = opts.instructions ?? [];
+    this.instructions = instructions.map(({ content: _content, ...info }) => info);
+    this.system = withInstructions(
       opts.system ??
-      `You are Albireo, a careful coding agent working in ${opts.cwd} (platform: ${process.platform}). ` +
-        `Use the provided tools to inspect and change files. Be concise.`;
+        `You are Albireo, a careful coding agent working in ${opts.cwd} (platform: ${process.platform}). ` +
+          `Use the provided tools to inspect and change files. Be concise.`,
+      instructions,
+    );
   }
 
   get providerId(): string {
@@ -95,6 +109,13 @@ export class Session {
   }
   get status(): "idle" | "running" {
     return this.running ? "running" : "idle";
+  }
+  /**
+   * True when the history ends with a user message that the model has not answered: the last turn
+   * failed, was aborted or refused. `retry()` then runs it again without adding a message.
+   */
+  get canRetry(): boolean {
+    return !this.running && this.history[this.history.length - 1]?.role === "user";
   }
 
   on(listener: (e: LoggedEvent) => void): () => void {
@@ -111,6 +132,9 @@ export class Session {
       model: this.model,
       providers: this.registry.ids(),
       pending: [...this.pendingEvents.values()],
+      cwd: this.cwd,
+      instructions: this.instructions.map((i) => ({ ...i })),
+      canRetry: this.canRetry,
     };
   }
 
@@ -145,6 +169,23 @@ export class Session {
   }
 
   async send(text: string): Promise<void> {
+    await this.turn(() => {
+      this.history.push({ role: "user", content: [{ type: "text", text }] });
+      this.emit({ type: "user", text });
+    });
+  }
+
+  /** Runs the last turn again, from the history as it is: nothing is added to it. See `canRetry`. */
+  async retry(): Promise<void> {
+    if (!this.running && !this.canRetry) {
+      this.emit({ type: "error", message: "There is nothing to retry" });
+      return;
+    }
+    await this.turn();
+  }
+
+  /** One user turn: `begin` records what starts it, then the model and its tool calls run until it stops. */
+  private async turn(begin?: () => void): Promise<void> {
     if (this.running) {
       this.emit({ type: "error", message: "A turn is already running" });
       return;
@@ -153,8 +194,7 @@ export class Session {
     this.abortCtl = new AbortController();
     const signal = this.abortCtl.signal;
     this.emit({ type: "status", state: "running" });
-    this.history.push({ role: "user", content: [{ type: "text", text }] });
-    this.emit({ type: "user", text });
+    begin?.();
 
     try {
       for (let step = 0; step < this.maxSteps; step++) {
@@ -230,7 +270,7 @@ export class Session {
       for (const resolve of [...this.pending.values()]) resolve(false);
       this.running = false;
       this.abortCtl = undefined;
-      this.emit({ type: "status", state: "idle" });
+      this.emit({ type: "status", state: "idle", canRetry: this.canRetry });
     }
   }
 

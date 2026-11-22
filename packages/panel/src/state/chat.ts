@@ -1,7 +1,7 @@
 // Pure chat state: the page is a function of the server's events. `applyEvent` mutates the state it
 // is given, so the UI runs it inside a store's `produce` and the tests run it on a plain object.
 import type { Risk } from "@albireo/core";
-import type { ApprovalRequest, ServerEvent } from "../protocol.ts";
+import type { ApprovalRequest, InstructionInfo, ServerEvent } from "../protocol.ts";
 
 export interface ToolCall {
   id: string;
@@ -27,10 +27,18 @@ export interface ChatState {
   provider: string;
   model: string;
   providers: string[];
+  /** The workspace root the agent works in. */
+  cwd: string;
+  /** Instruction files (AGENTS.md) the kernel put in the system prompt. */
+  instructions: InstructionInfo[];
+  /** The last turn did not finish, so it can be run again (see Session.canRetry). */
+  canRetry: boolean;
   items: Item[];
   pending: ApprovalRequest[];
   /** Token totals over the events this view has seen (the server keeps a bounded log). */
   usage: { input: number; output: number; cacheRead: number };
+  /** Tokens the model was sent in its latest request: how full the context is. 0 before the first reply. */
+  context: number;
 }
 
 export function createChatState(): ChatState {
@@ -41,9 +49,13 @@ export function createChatState(): ChatState {
     provider: "",
     model: "",
     providers: [],
+    cwd: "",
+    instructions: [],
+    canRetry: false,
     items: [],
     pending: [],
     usage: { input: 0, output: 0, cacheRead: 0 },
+    context: 0,
   };
 }
 
@@ -95,6 +107,7 @@ export function applyEvent(s: ChatState, ev: ServerEvent): void {
       s.items = [];
       s.pending = [];
       s.usage = { input: 0, output: 0, cacheRead: 0 };
+      s.context = 0;
       for (const e of ev.log) applyEvent(s, e);
       if (ev.live) {
         const a = liveAssistant(s);
@@ -106,6 +119,9 @@ export function applyEvent(s: ChatState, ev: ServerEvent): void {
       s.provider = ev.provider;
       s.model = ev.model;
       s.providers = ev.providers;
+      s.cwd = ev.cwd ?? "";
+      s.instructions = ev.instructions ?? [];
+      s.canRetry = ev.canRetry === true;
       s.ready = true;
       return;
     }
@@ -116,6 +132,7 @@ export function applyEvent(s: ChatState, ev: ServerEvent): void {
       s.usage.input += ev.usage.inputTokens;
       s.usage.output += ev.usage.outputTokens;
       s.usage.cacheRead += ev.usage.cacheReadTokens ?? 0;
+      s.context = ev.usage.inputTokens + (ev.usage.cacheReadTokens ?? 0);
       return;
     }
     case "secrets_changed":
@@ -156,6 +173,7 @@ export function applyEvent(s: ChatState, ev: ServerEvent): void {
       return;
     case "status":
       s.status = ev.state;
+      s.canRetry = ev.state === "idle" && ev.canRetry === true;
       return;
     case "notice":
       s.items.push({ kind: "notice", text: ev.text });
@@ -164,4 +182,13 @@ export function applyEvent(s: ChatState, ev: ServerEvent): void {
       s.items.push({ kind: "error", text: ev.message });
       return;
   }
+}
+
+/** The text of the most recent user message, if there is one. */
+export function lastUserText(items: readonly Item[]): string | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it?.kind === "user") return it.text;
+  }
+  return undefined;
 }

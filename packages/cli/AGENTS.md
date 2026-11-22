@@ -8,6 +8,7 @@
   - 无头模式（`--prompt`）：把输出流式写到 stdout，自动拒绝所有需要审批的调用，跑完退出。
   - `albireo keys …`：第一个参数是 `keys` 时，在解析主参数之前分流到 `runKeysCommand`，不启动 Session。不开面板也能查看、设置、清除 vault 里的凭据，例如只能 SSH 登录、没有浏览器的机器。
 - `--yolo` 把 `autoApprove` 扩大到全部风险等级；默认只放行 `read`。
+- 启动时用 core 的 `loadInstructions(cwd)` 读工作区的 `AGENTS.md`，交给 `Session`（面板的 Context 页能看到它是否生效）。
 - Provider 来自 `@albireo/vault` 的 `createVaultRegistry()`，凭据存在加密 vault，非敏感端点定义存在同目录的 `providers.json`（`ProviderConfigStore.open()`），**不读环境变量**。启动时同时打开两者，再把 `SecretManager` 交给面板服务。
   - `--provider` 指定的 provider 不存在（或被 `providers.json` 校验拒绝）时，服务模式与无头模式都在报错中附带 `config.error`。
   - 服务模式：vault 为空、锁定、缺 key 或 `providers.json` 损坏都照常启动，打印状态，让用户在面板里配置。

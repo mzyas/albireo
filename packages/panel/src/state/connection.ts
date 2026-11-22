@@ -2,6 +2,7 @@ import { token } from "../api.ts";
 import type { ServerEvent } from "../protocol.ts";
 import { loadSecrets } from "./secrets.ts";
 import { dispatch, setChat } from "./store.ts";
+import { noteEvent } from "./workspace.ts";
 
 /**
  * Opens the event stream. The first message is a snapshot; after that every kernel event arrives in
@@ -24,6 +25,7 @@ export function connect(): () => void {
       return;
     }
     dispatch(ev);
+    noteEvent(ev);
     if (ev.type === "snapshot") void loadSecrets();
   };
   return () => es.close();

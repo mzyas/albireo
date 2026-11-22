@@ -15,5 +15,5 @@
     "rootDir": "."
   },
   "include": ["src", "test"],
-  "references": [{ "path": "../core" }, { "path": "../vault" }]
+  "references": [{ "path": "../core" }, { "path": "../vault" }, { "path": "../server" }]
 }

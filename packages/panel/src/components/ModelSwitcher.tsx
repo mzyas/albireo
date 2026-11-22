@@ -3,11 +3,13 @@ import { modelSuggestions, providerLabel } from "../lib/vault.ts";
 import { switchModel } from "../state/actions.ts";
 import { vault } from "../state/secrets.ts";
 import { chat } from "../state/store.ts";
+import { setSwitcherOpen, switcherOpen } from "../state/ui.ts";
 
 /** The provider · model chip in the top bar, with a small popover to switch between turns. */
 export function ModelSwitcher() {
   let root!: HTMLDivElement;
-  const [open, setOpen] = createSignal(false);
+  const open = switcherOpen;
+  const setOpen = setSwitcherOpen;
   const [picked, setPicked] = createSignal("");
   const [model, setModel] = createSignal("");
 

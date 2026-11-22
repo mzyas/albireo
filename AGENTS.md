@@ -14,7 +14,7 @@ Albireo 是一个与厂商无关的编码 Agent：无头内核（Session）+ GUI
 | `packages/cli`    | `albireo` / `albi` 命令行入口                         | [packages/cli/AGENTS.md](packages/cli/AGENTS.md)       |
 | `packages/panel`  | GUI 面板（Vite + SolidJS），构建成单个 `index.html`   | [packages/panel/AGENTS.md](packages/panel/AGENTS.md)   |
 
-依赖方向：`cli → server → vault → core`；`cli` 和 `server` 也直接依赖 `core`，`cli` 也直接依赖 `vault`。`core` 不依赖任何其他包，也不知道界面和凭据库存在；界面只通过 `Session` 的事件和方法交互。`panel` 在运行时不依赖任何 workspace 包，只以 `import type` 引用 `core` 和 `vault` 的协议类型，由 server 在运行时提供。
+依赖方向：`cli → server → vault → core`；`cli` 和 `server` 也直接依赖 `core`，`cli` 也直接依赖 `vault`。`core` 不依赖任何其他包，也不知道界面和凭据库存在；界面只通过 `Session` 的事件和方法交互。`panel` 在运行时不依赖任何 workspace 包，只以 `import type` 引用 `core`、`vault` 和 `server`（`@albireo/server/protocol`）的协议类型，由 server 在运行时提供。
 
 ## 命令
 

@@ -4,6 +4,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Session } from "@albireo/core";
 import { type SecretManager, VaultError, type VaultErrorCode } from "@albireo/vault";
+import { Workspace, WorkspaceError } from "./workspace.js";
+
+export type * from "./protocol.js";
 
 export interface PanelServerOptions {
   /** 0 (default) picks a free port. */
@@ -131,6 +134,40 @@ async function handleSecrets(
 }
 
 /**
+ * Read-only views of the workspace (changes, diffs, file list, preview). Called after the Host and token
+ * checks, like every other route; nothing here writes, and failures never echo paths or git's output.
+ */
+async function handleWorkspace(res: http.ServerResponse, url: URL, workspace: Workspace): Promise<void> {
+  try {
+    const param = (name: string) => url.searchParams.get(name) ?? "";
+    switch (url.pathname) {
+      case "/workspace/changes":
+        replyJson(res, 200, await workspace.changes());
+        return;
+      case "/workspace/diff":
+        replyJson(res, 200, await workspace.diff(param("path"), param("from") || undefined));
+        return;
+      case "/workspace/files": {
+        const limit = Number(url.searchParams.get("limit") ?? 50);
+        replyJson(res, 200, await workspace.files(param("q"), Number.isFinite(limit) ? limit : 50));
+        return;
+      }
+      case "/workspace/file":
+        replyJson(res, 200, await workspace.preview(param("path")));
+        return;
+      default:
+        replyJson(res, 404, { error: "not found" });
+    }
+  } catch (err) {
+    if (err instanceof WorkspaceError) {
+      replyJson(res, err.code === "not_found" ? 404 : 400, { error: err.message, code: err.code });
+    } else {
+      replyJson(res, 500, { error: "internal error" });
+    }
+  }
+}
+
+/**
  * Local-only bridge between a running Session and the GUI panel.
  * The agent can execute commands, so the server is locked down: loopback bind,
  * Host-header check (DNS rebinding), and a per-run secret token on every request.
@@ -139,6 +176,7 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
   const token = randomBytes(24).toString("hex");
   const publicDir = opts.publicDir ?? new URL("../../panel/dist/", import.meta.url);
   let port = 0;
+  const workspace = new Workspace(session.cwd);
   // Vault changes aren't session events; tell every connected panel to re-fetch GET /secrets.
   const streams = new Set<http.ServerResponse>();
   const offSecrets = opts.secrets?.onChange(() => {
@@ -204,6 +242,11 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
         return;
       }
 
+      if (req.method === "GET" && url.pathname.startsWith("/workspace/")) {
+        await handleWorkspace(res, url, workspace);
+        return;
+      }
+
       if (req.method === "POST" && url.pathname === "/command") {
         const cmd = JSON.parse(await readBody(req)) as Record<string, unknown>;
         switch (cmd.type) {
@@ -217,6 +260,9 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
             break;
           case "abort":
             session.abort();
+            break;
+          case "retry":
+            void session.retry();
             break;
           case "switch":
             if (typeof cmd.provider !== "string") throw new Error("provider required");
