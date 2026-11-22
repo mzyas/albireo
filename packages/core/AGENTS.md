@@ -9,6 +9,7 @@
 | `src/types.ts`         | 中立模型：`Message`、`ContentPart`、`Provider`、`WireApi`、`ProviderAuthMode`、`ProviderHeaders`、`TurnRequest`/`TurnResult`、`StopReason`、`Usage`、`MessageMeta` |
 | `src/session.ts`       | `Session`：Agent 循环、工具执行、审批、事件流（`KernelEvent`）、`snapshot()`                                                                                       |
 | `src/history.ts`       | `normalizeHistory`（纯函数）、`replaysNatively`                                                                                                                    |
+| `src/instructions.ts`  | `loadInstructions`（读工作区根目录的指令文件）、`withInstructions`（拼进系统提示）、`InstructionInfo`（给界面看的只有名字和大小）                                  |
 | `src/replay.ts`        | `eventsFromHistory`（纯函数）：从历史重建事件，恢复的会话靠它填 `snapshot()`                                                                                       |
 | `src/tool.ts`          | `Tool`、`Risk`、`defineTool`、`toSpec`（zod → JSON Schema）                                                                                                        |
 | `src/tools/builtin.ts` | 内置工具（清单以文件末尾的 `builtinTools` 为准）和 `resolveInside`（路径限制在工作区内）                                                                           |
@@ -32,6 +33,8 @@
 - **换凭据不打断对话**：`refreshProvider()` 从 registry 重新取当前 provider，只能在两轮之间调用；显式指定过的模型保持不变。
 - **事件**：`text_delta`/`reasoning_delta` 只是临时的，不记日志；其余事件都进日志，供后连上的客户端通过 `snapshot()` 回放。新增事件类型时要同时考虑 server 和 panel 怎么处理。
 - `Session` 在 `assistant_end` 之后给助手消息补上 `meta`；适配器不用自己填。
+- **重试不改历史**：`Session.retry()` 只在历史以用户消息结尾时可用（上一轮出错、被中止或被拒绝，见 `canRetry`），它原样重跑，不追加任何消息。`canRetry` 随 `snapshot()` 和每个 `status: idle` 事件发出，界面据此显示“重试”。已经答完的轮次不能“重来”：那需要回退历史，不在这里做。
+- **指令文件是工作区里的不可信文本**：`loadInstructions` 只读根目录的 `AGENTS.md`，不跟随符号链接（文本会发给模型厂商，链接不能把工作区外的文件带进去），超过上限就截断并标记。全文只进系统提示；`snapshot()` 只给名字、大小和是否被截断。它们进系统提示时声明了“不覆盖用户请求和审批规则”，但审批规则本身才是防线：任何指令都不能让工具绕过审批。
 - **历史只增不改，而且只经过 `commit`**。一轮里消息进入 `history` 的唯一入口是 `Session` 的私有 `commit`，它同时通知 `onMessage` 的监听者（存储靠它落盘，不要让存储去读 `history`）。新增往 `history` 里写消息的路径时，必须走 `commit`，否则不会被保存。监听者抛异常会被吞掉：存不了盘不能打断对话。
 - **恢复的会话**：`SessionOptions.history` 里的消息成为 `history`，不会再通知 `onMessage`；`snapshot()` 里的事件由 `eventsFromHistory` 重建，所以流式增量、通知、错误、审批请求不会回来，没有收到结果的工具调用会补一个错误结果，免得界面一直显示"运行中"。事件的 `seq` 接着重建出来的往下编。内核不知道存储的存在。
 

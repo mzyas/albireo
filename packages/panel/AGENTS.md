@@ -4,20 +4,20 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
 
 - 命令：`pnpm --filter @albireo/panel build`（根目录的 `pnpm build` 会先 `tsc -b` 再构建面板）；`pnpm --filter @albireo/panel dev` 是 `vite build --watch`，改完刷新浏览器就能看到。没有 Vite dev server：每个请求都要带 token，而 `<script src>` 带不了请求头，所以才内联成一个文件。
 - 类型检查走根 `tsconfig.json` 的 `references`（`emitDeclarationOnly`，产物在 `node_modules/.cache`），和包的构建分开：`tsc -b` 管类型，Vite 管打包。
-- 面板以 `import type` 依赖 `@albireo/core`（`KernelEvent`、`Snapshot`）和 `@albireo/vault`（`SecretsStatus`），都收在 `src/protocol.ts`。协议一改，`tsc -b` 在这里就会报错。不要在运行时导入这两个包。
+- 面板以 `import type` 依赖 `@albireo/core`（`KernelEvent`、`Snapshot`）、`@albireo/vault`（`SecretsStatus`）和 `@albireo/server/protocol`（工作区路由的响应类型），都收在 `src/protocol.ts`。协议一改，`tsc -b` 在这里就会报错。不要在运行时导入这些包。
 - `solid-js` 停在 1.x：`vite-plugin-solid` 的稳定版还不支持 2.x。升级前先确认插件已支持。
 - `index.html` 里的 CSP 把 `connect-src` 限制为同源：模型输出是不可信的，这是兜底。加外部资源（字体、CDN、图片）要先想清楚。
 
 ## 结构
 
-| 位置                | 内容                                                                                                                   |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/state/chat.ts` | **纯函数** `applyEvent(state, event)`：页面状态完全由事件驱动，先 `snapshot` 再逐条事件。没有 Solid 依赖，测试直接跑它 |
-| `src/state/`        | `store.ts`（Solid store + `dispatch`）、`connection.ts`（SSE）、`secrets.ts`、`drafts.ts`、`actions.ts`、`ui.ts`       |
-| `src/lib/`          | 无 DOM、无 Solid 的纯函数：保险库状态文案、自定义 provider 载荷、Markdown 实体与链接白名单、工具摘要                   |
-| `src/components/`   | 组件。`Conversation`、`ToolRun`、`Markdown`、`ApprovalCard`、`Composer`、`TopBar`、`ModelSwitcher`、`KeysDialog` 等    |
-| `src/api.ts`        | token（来自页面 URL 的 `?token=`）、`api()`、`postCommand()`。SSE 用查询参数带 token，其余请求用 `x-albireo-token` 头  |
-| `src/styles.css`    | 设计令牌和全部样式。蓝色是"在工作"（操作、链接、运行中），金色只表示"需要你介入"（审批、告警）；明暗随系统             |
+| 位置                | 内容                                                                                                                                                                                                                  |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/state/chat.ts` | **纯函数** `applyEvent(state, event)`：页面状态完全由事件驱动，先 `snapshot` 再逐条事件。没有 Solid 依赖，测试直接跑它                                                                                                |
+| `src/state/`        | `store.ts`（Solid store + `dispatch`）、`connection.ts`（SSE）、`secrets.ts`、`drafts.ts`、`actions.ts`、`ui.ts`、`workspace.ts`（侧栏数据，读 `/workspace/*`）、`commands.ts`（斜杠命令的执行）                      |
+| `src/lib/`          | 无 DOM、无 Solid 的纯函数：保险库状态文案、自定义 provider 载荷、Markdown 实体与链接白名单、工具摘要、`diff.ts`（统一 diff 解析）、`composer.ts`（`@`/`/` 触发与补全）、`commands.ts`（命令表与解析）、`workspace.ts` |
+| `src/components/`   | 组件。`Conversation`、`ToolRun`、`Markdown`、`ApprovalCard`、`Composer`、`TopBar`、`ModelSwitcher`、`KeysDialog`；右侧栏是 `SidePane`（`ChangesTab`、`FilesTab`、`ContextTab`、`DiffView`）                           |
+| `src/api.ts`        | token（来自页面 URL 的 `?token=`）、`api()`、`postCommand()`。SSE 用查询参数带 token，其余请求用 `x-albireo-token` 头                                                                                                 |
+| `src/styles.css`    | 设计令牌和全部样式。蓝色是"在工作"（操作、链接、运行中），金色只表示"需要你介入"（审批、告警）；明暗随系统                                                                                                            |
 
 要新增一种事件的显示：先在 `src/state/chat.ts` 的 `applyEvent` 里加分支（并补测试），再决定组件怎么画。
 
@@ -30,6 +30,9 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
   - `needsUnlock` 为 true（口令 vault 锁定）时新增和删除都禁用；vault 打不开（`error`）时只禁用新增；服务端也会拒绝。
   - provider 带 `problem`（比如 baseURL 过不了检查）时徽标显示不可用，当前 provider 有问题时顶栏的 API Keys 按钮也提醒。
   - Base URL 和 Model 的未保存编辑记在 `drafts.ts`，只提交改过的字段：单独存 key、清除 key 或只改其中一个字段，都不会重发另一个（包括可能被掩码的 Base URL），也不会丢掉没保存的编辑；关掉对话框编辑还在。所有密钥输入框在保存或关闭对话框后清空。
+- **右侧栏只读**：Changes / Files / Context 只显示，不改工作区。数据来自 `GET /workspace/*`（`state/workspace.ts`），晚到的旧响应会被丢弃；一轮结束、写/执行类工具出结果、收到 `snapshot` 时刷新变更列表，不监听文件系统。diff 和文件预览都是文本节点（同样不用 `innerHTML`）。侧栏的开合记在 `localStorage`（读写都包了 try/catch），没有记录时按窗口宽度决定；窄屏上它盖在对话上。
+- **`@` 和 `/` 只在输入框里处理**：`@文件` 补全后留在消息里原样发出，模型自己用 `read_file` 去读（不附带内容、不改协议）；带空格的路径补全时加引号。`/命令` 在面板里执行，不发给模型；**只有表里的命令才算命令**，`/usr/bin/x 找不到` 这类消息照常发送。菜单打开时 `Enter` 补全，已经完整输入的 `@文件` 或命令则直接发送/执行。`/clear` 和 `/compact` 还没做：它们要改历史，得等多会话和存储的“替换”记录。
+- **重试和编辑**：“重试”按钮只在内核说 `canRetry` 时出现（`status: idle` 事件和快照都带这个字段），原样重跑上一轮，不产生新的用户消息。“编辑”只出现在最后一条用户消息上，把文字放回输入框；发送会追加一条**新**消息，之前那一轮留在历史里（内核不回退历史）。
 - Biome 也检查 TSX、CSS 和 HTML（含 a11y 规则）。抑制规则要写理由。
 
 ## 测试
@@ -38,4 +41,4 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
 
 ## 计划
 
-多会话、工作区选择、Changes/Files 侧栏、设置页、Electron 外壳都还没做；布局按这些预留（顶栏、主列、底部 dock）。
+多会话、工作区选择、设置页、Electron 外壳都还没做；布局按这些预留（顶栏、主列、底部 dock、右侧栏）。Context 页现在只显示 token 用量，没有“占上下文百分之几”：那需要每个模型的上下文窗口大小，目前没有数据来源。

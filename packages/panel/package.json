@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@albireo/core": "workspace:*",
+    "@albireo/server": "workspace:*",
     "@albireo/vault": "workspace:*",
     "vite": "^8.3.8",
     "vite-plugin-singlefile": "^2.3.4",

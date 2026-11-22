@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { builtinTools, type Risk, Session } from "@albireo/core";
+import { builtinTools, loadInstructions, type Risk, Session } from "@albireo/core";
 import { startPanelServer } from "@albireo/server";
 import { type LoadedSession, type Recording, SessionStore, StoreError, sameDir } from "@albireo/store";
 import {
@@ -162,6 +162,7 @@ try {
     model: values.model ?? resumedModel,
     tools: builtinTools,
     cwd,
+    instructions: await loadInstructions(cwd),
     autoApprove,
     history: resumed?.messages,
   });

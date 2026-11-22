@@ -15,6 +15,7 @@
   - `--no-save` 不录制，但仍可以接着一个已保存的会话聊，且不改动它。
   - 退出前（无头模式跑完、服务模式收到 SIGINT/SIGTERM）必须 `await recording.flush()`，否则最后几条消息可能还没写完。写盘失败只提示一次，对话继续。
   - 子命令 `albireo sessions` 和 `keys` 一样，在解析主参数之前分流。
+- 启动时用 core 的 `loadInstructions(cwd)` 读工作区的 `AGENTS.md`，交给 `Session`（面板的 Context 页能看到它是否生效）。
 - Provider 来自 `@albireo/vault` 的 `createVaultRegistry()`，凭据存在加密 vault，非敏感端点定义存在同目录的 `providers.json`（`ProviderConfigStore.open()`），**不读环境变量**。启动时同时打开两者，再把 `SecretManager` 交给面板服务。
   - `--provider` 指定的 provider 不存在（或被 `providers.json` 校验拒绝）时，服务模式与无头模式都在报错中附带 `config.error`。
   - 服务模式：vault 为空、锁定、缺 key 或 `providers.json` 损坏都照常启动，打印状态，让用户在面板里配置。

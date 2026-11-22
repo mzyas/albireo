@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ServerEvent } from "../src/protocol.ts";
-import { applyEvent, type ChatState, createChatState } from "../src/state/chat.ts";
+import { applyEvent, type ChatState, createChatState, lastUserText } from "../src/state/chat.ts";
 
 const usage = { inputTokens: 10, outputTokens: 5 };
 
@@ -139,4 +139,98 @@ test("provider_changed updates the active model and leaves a notice", () => {
 
 test("secrets_changed is not a chat event", () => {
   assert.deepEqual(feed([{ type: "secrets_changed" }]), createChatState());
+});
+
+test("the snapshot carries the workspace, the loaded instructions and whether the last turn can be retried", () => {
+  const s = feed([
+    {
+      type: "snapshot",
+      log: [],
+      live: null,
+      pending: [],
+      status: "idle",
+      provider: "anthropic",
+      model: "m",
+      providers: ["anthropic"],
+      cwd: "/work/project",
+      instructions: [{ path: "AGENTS.md", bytes: 120, truncated: false }],
+      canRetry: true,
+    },
+  ]);
+  assert.equal(s.cwd, "/work/project");
+  assert.deepEqual(s.instructions, [{ path: "AGENTS.md", bytes: 120, truncated: false }]);
+  assert.equal(s.canRetry, true);
+});
+
+test("a turn that ends unanswered can be retried; starting one or finishing it cleanly cannot", () => {
+  const s = feed([
+    { type: "status", state: "running" },
+    { type: "user", text: "hi" },
+    { type: "error", message: "network down" },
+    { type: "status", state: "idle", canRetry: true },
+  ]);
+  assert.equal(s.canRetry, true);
+  feed([{ type: "status", state: "running" }], s);
+  assert.equal(s.canRetry, false, "not while it runs");
+  feed([{ type: "status", state: "idle", canRetry: false }], s);
+  assert.equal(s.canRetry, false);
+  feed([{ type: "status", state: "idle" }], s);
+  assert.equal(s.canRetry, false, "an idle event that doesn't say so means no");
+});
+
+test("context is the size of the latest request, cached tokens included, and resets with a snapshot", () => {
+  const s = feed([
+    {
+      type: "assistant_end",
+      text: "a",
+      usage: { inputTokens: 100, outputTokens: 5, cacheReadTokens: 400 },
+      provider: "p",
+      model: "m",
+    },
+    { type: "assistant_end", text: "b", usage: { inputTokens: 30, outputTokens: 5 }, provider: "p", model: "m" },
+  ]);
+  assert.equal(s.context, 30, "the latest request, not a sum");
+  feed(
+    [
+      {
+        type: "assistant_end",
+        text: "c",
+        usage: { inputTokens: 20, outputTokens: 1, cacheReadTokens: 80 },
+        provider: "p",
+        model: "m",
+      },
+    ],
+    s,
+  );
+  assert.equal(s.context, 100);
+  feed(
+    [
+      {
+        type: "snapshot",
+        log: [],
+        live: null,
+        pending: [],
+        status: "idle",
+        provider: "p",
+        model: "m",
+        providers: [],
+        cwd: "",
+        instructions: [],
+        canRetry: false,
+      },
+    ],
+    s,
+  );
+  assert.equal(s.context, 0);
+});
+
+test("lastUserText finds the most recent user message", () => {
+  assert.equal(lastUserText([]), undefined);
+  const s = feed([
+    { type: "user", text: "first" },
+    { type: "assistant_end", text: "ok", usage, provider: "p", model: "m" },
+    { type: "user", text: "second" },
+    { type: "notice", text: "n" },
+  ]);
+  assert.equal(lastUserText(s.items), "second");
 });

@@ -13,6 +13,13 @@ export async function sendMessage(text: string): Promise<void> {
   if (!(await run({ type: "send", text }))) setChat("status", "idle");
 }
 
+/** Runs the last turn again. The server's `status` events say when it starts and ends. */
+export async function retryTurn(): Promise<void> {
+  setChat("status", "running");
+  setChat("canRetry", false);
+  if (!(await run({ type: "retry" }))) setChat("status", "idle");
+}
+
 export function answerApproval(id: string, allow: boolean): void {
   void run({ type: "approve", id, allow });
 }
