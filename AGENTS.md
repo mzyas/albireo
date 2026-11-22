@@ -13,16 +13,16 @@ Albireo 是一个与厂商无关的编码 Agent：无头内核（Session）+ GUI
 | `packages/store`  | 会话持久化：把对话存到磁盘，下次接着聊                | [packages/store/AGENTS.md](packages/store/AGENTS.md)   |
 | `packages/server` | 把 Session 通过 SSE + POST 暴露给面板（仅本机）       | [packages/server/AGENTS.md](packages/server/AGENTS.md) |
 | `packages/cli`    | `albireo` / `albi` 命令行入口                         | [packages/cli/AGENTS.md](packages/cli/AGENTS.md)       |
-| `packages/panel`  | 静态 GUI 面板，无构建步骤                             | [packages/panel/AGENTS.md](packages/panel/AGENTS.md)   |
+| `packages/panel`  | GUI 面板（Vite + SolidJS），构建成单个 `index.html`   | [packages/panel/AGENTS.md](packages/panel/AGENTS.md)   |
 
-依赖方向：`cli → server → vault → core`；`cli → store → core`；`cli` 和 `server` 也直接依赖 `core`，`cli` 也直接依赖 `vault`。`store` 不依赖 `vault`。`core` 不依赖任何其他包，也不知道界面和凭据库存在；界面只通过 `Session` 的事件和方法交互。
+依赖方向：`cli → server → vault → core`；`cli → store → core`；`cli` 和 `server` 也直接依赖 `core`，`cli` 也直接依赖 `vault`。`store` 不依赖 `vault`。`core` 不依赖任何其他包，也不知道界面和凭据库存在；界面只通过 `Session` 的事件和方法交互。`panel` 在运行时不依赖任何 workspace 包，只以 `import type` 引用 `core` 和 `vault` 的协议类型，由 server 在运行时提供。
 
 ## 命令
 
 ```bash
 pnpm install          # Node 版本见 package.json 的 engines，pnpm 版本见 packageManager
-pnpm build            # tsc -b，按 tsconfig 的 references 增量构建所有包
-pnpm test             # 各包的 node:test；测试导入 dist/，所以先 build
+pnpm build            # tsc -b（所有包的编译和类型检查），再构建面板（Vite）
+pnpm test             # 各包的 node:test；多数测试导入 dist/，所以先 build（面板的测试直接跑源码）
 pnpm lint             # Biome：lint + 格式 + import 排序
 pnpm lint:fix         # 自动修复能修的部分
 ```
