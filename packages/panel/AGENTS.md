@@ -16,6 +16,7 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
 | `src/state/`        | `sessions.ts`（会话列表和当前会话）、`composerMemory.ts`（每个会话各自的草稿和队列）、`store.ts`（Solid store + `dispatch`）、`connection.ts`（SSE）、`secrets.ts`、`drafts.ts`、`actions.ts`、`ui.ts`、`workspace.ts`（侧栏数据，读 `/workspace/*`）、`commands.ts`（斜杠命令的执行） |
 | `src/lib/`          | 无 DOM、无 Solid 的纯函数：保险库状态文案、自定义 provider 载荷、Markdown 实体与链接白名单、工具摘要、`diff.ts`（统一 diff 解析）、`composer.ts`（`@`/`/` 触发与补全）、`commands.ts`（命令表与解析）、`workspace.ts`                                                                  |
 | `src/components/`   | 组件。`Conversation`、`ToolRun`、`Markdown`、`ApprovalCard`、`Composer`、`TopBar`、`ModelSwitcher`、`KeysDialog`；右侧栏是 `SidePane`（`ChangesTab`、`FilesTab`、`ContextTab`、`DiffView`）                                                                                            |
+| `src/desktop.ts`    | 桌面应用注入的 `window.albireo`（没有就是 `undefined`）                                                                                                                                                                                                                                |
 | `src/api.ts`        | token（来自页面 URL 的 `?token=`）、`api()`、`postCommand()`。SSE 用查询参数带 token，其余请求用 `x-albireo-token` 头                                                                                                                                                                  |
 | `src/styles.css`    | 设计令牌和全部样式。蓝色是"在工作"（操作、链接、运行中），金色只表示"需要你介入"（审批、告警）；明暗随系统                                                                                                                                                                             |
 
@@ -28,7 +29,7 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
 - 运行中输入的消息排队，上一轮结束后依次发出（队列只在页面里，不在内核里）。队列和没发出的草稿**按会话各存各的**（`composerMemory.ts`）：切换会话不能把半条消息或排队的消息带进另一个对话；排队的消息只有在它的会话被显示、已收到快照且空闲时才发出。
 - **页面一次只显示一个会话**：`state/sessions.ts` 的 `activeId` 变化时，`index.tsx` 里的 effect 关掉旧的事件流、清空聊天和工作区状态、为新会话开流（`connect(id)`）；命令和 `/workspace/*` 请求通过 `api.ts` 的 `setApiSession`/`forSession` 带上 `session`。收到 `sessions_changed`（或流被服务端拒绝重连）就重新 `GET /sessions`，并保证显示的会话存在：还在就保持，否则回到上次看的、服务端的默认、最新的，一个都没有就起一个。保存的会话先 `POST /sessions/:id/open` 再显示。
 - **会话列表是 store，不是 signal**：每次变化都会重新拉取，用 `reconcile`（按 `id`）保持未变的会话是同一个对象，侧栏的分组按工作区 key（字符串）而不是对象来跟踪；否则每次刷新都会重建所有行，行内“确认删除”的状态、焦点都会丢。
-- **新建会话**：对话框里选用过的工作区或输入绝对路径，服务端检查；新会话用当前的 provider（模型用它的默认值）。有会话在等审批时标签页标题会变成 “(n) … needs your answer”。窄屏（≤900px）上侧栏和右侧栏都盖在对话上，同时只开一个。
+- **新建会话**：对话框里选用过的工作区或输入绝对路径，服务端检查；新会话用当前的 provider（模型用它的默认值）。在桌面应用的窗口里多一个“Browse…”按钮，调用 `window.albireo.pickDirectory`（`src/desktop.ts` 按形状检查它在不在，普通浏览器里没有就不显示按钮）；选出来的路径只是填进输入框，不会直接开会话。有会话在等审批时标签页标题会变成 “(n) … needs your answer”。窄屏（≤900px）上侧栏和右侧栏都盖在对话上，同时只开一个。
 - `API Keys` 对话框管理加密 vault 与自定义 provider：provider 列表、模型建议和状态全部来自 `GET /secrets`（收到 `snapshot` 或 `secrets_changed` 时重新拉取）。页面上只有掩码提示；新增自定义 provider 时先 `POST /providers` 存配置，再用 `POST /secrets/provider` 存可选的初始密钥，密钥失败时 provider 照样留着，不回滚。删除走 `DELETE /providers/:id`。
   - `needsUnlock` 为 true（口令 vault 锁定）时新增和删除都禁用；vault 打不开（`error`）时只禁用新增；服务端也会拒绝。
   - provider 带 `problem`（比如 baseURL 过不了检查）时徽标显示不可用，当前 provider 有问题时顶栏的 API Keys 按钮也提醒。
@@ -44,4 +45,4 @@ GUI 面板：Vite + SolidJS，构建成**单个** `dist/index.html`（脚本和�
 
 ## 计划
 
-设置页、Electron 外壳还没做；布局按这些预留（左侧会话栏、顶栏、主列、底部 dock、右侧栏）。工作区只能选用过的或输入路径，原生的文件夹选择器等 Electron 外壳。Context 页现在只显示 token 用量，没有“占上下文百分之几”：那需要每个模型的上下文窗口大小，目前没有数据来源。
+设置页还没做；布局按这些预留（左侧会话栏、顶栏、主列、底部 dock、右侧栏）。Electron 外壳在 `packages/desktop`：它给页面注入 `window.albireo`（`DesktopBridge`），目前只有原生文件夹选择器。Context 页现在只显示 token 用量，没有“占上下文百分之几”：那需要每个模型的上下文窗口大小，目前没有数据来源。

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { builtinTools, ProviderRegistry, ScriptedProvider, Session } from "@albireo/core";
 import { SessionStore } from "@albireo/store";
-import { ManagerError, resumeChoice, SessionManager, startPanelServer } from "../dist/index.js";
+import { defaultSessionsDir, ManagerError, resumeChoice, SessionManager, startPanelServer } from "../dist/index.js";
 
 // ---- a provider the tests can steer through the user's message ------------------------------------
 
@@ -805,5 +806,37 @@ test("a server handed one session still works as before and refuses the session 
   } finally {
     await panel.close();
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saved sessions live in a folder beside the vault", () => {
+  assert.equal(defaultSessionsDir(path.join("config", "albireo")), path.join("config", "albireo", "sessions"));
+  assert.ok(path.isAbsolute(defaultSessionsDir()), "the default is the per-user config dir");
+});
+
+test("a server that cannot take its port leaves no listeners on the manager", async () => {
+  const t = await setup();
+  const blocker = net.createServer();
+  try {
+    await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    let added = 0;
+    let removed = 0;
+    for (const name of ["onChange", "onRemoved"]) {
+      const original = t.manager[name].bind(t.manager);
+      t.manager[name] = (listener) => {
+        added++;
+        const off = original(listener);
+        return () => {
+          removed++;
+          off();
+        };
+      };
+    }
+    await assert.rejects(startPanelServer(t.manager, { port: blocker.address().port }), { code: "EADDRINUSE" });
+    assert.ok(added >= 2, "the server did subscribe before it tried to listen");
+    assert.equal(removed, added, "every subscription was undone");
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+    await t.cleanup();
   }
 });
