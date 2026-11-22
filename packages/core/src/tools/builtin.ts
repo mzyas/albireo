@@ -4,6 +4,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { type AnyTool, defineTool } from "../tool.js";
+import { applyEdit } from "./edit.js";
+import { formatSearchResult, runSearch } from "./search.js";
 
 const execAsync = promisify(exec);
 
@@ -58,6 +60,73 @@ const writeFileTool = defineTool({
   },
 });
 
+const MAX_EDIT_BYTES = 2_000_000;
+
+const editFileTool = defineTool({
+  name: "edit_file",
+  description:
+    "Edit an existing UTF-8 text file in the workspace by replacing an exact string. old_string must match " +
+    "the file exactly (whitespace and indentation included) and be unique: include enough surrounding lines " +
+    "to make it so, or set replace_all to change every occurrence. Prefer this over write_file for changes " +
+    "to existing files, and read the file first.",
+  risk: "write",
+  input: z.object({
+    path: z.string().describe("Path relative to the workspace root"),
+    old_string: z.string().describe("The exact text to replace"),
+    new_string: z.string().describe("The replacement text; may be empty to delete"),
+    replace_all: z.boolean().default(false).describe("Replace every occurrence instead of requiring a unique match"),
+  }),
+  async run({ path: p, old_string, new_string, replace_all }, { cwd }) {
+    const target = resolveInside(cwd, p);
+    const buf = await readFile(target);
+    if (buf.length > MAX_EDIT_BYTES) throw new Error(`${p} is too large to edit (limit ${MAX_EDIT_BYTES} bytes).`);
+    const text = buf.toString("utf8");
+    // Writing back text that did not decode cleanly (binary, other encodings) would corrupt the file.
+    if (buf.includes(0) || !Buffer.from(text, "utf8").equals(buf)) {
+      throw new Error(`${p} is not a UTF-8 text file, so it cannot be edited safely.`);
+    }
+    const edit = applyEdit(text, old_string, new_string, replace_all);
+    await writeFile(target, edit.text, "utf8");
+    return edit.count === 1
+      ? `Edited ${p}: replaced 1 occurrence at line ${edit.line}.`
+      : `Edited ${p}: replaced ${edit.count} occurrences (the first at line ${edit.line}).`;
+  },
+});
+
+const MAX_MATCHES = 100;
+
+const grepTool = defineTool({
+  name: "grep",
+  description:
+    "Search file contents in the workspace with a regular expression (JavaScript syntax, matched against " +
+    "one line at a time). Returns one `path:line: text` line per match, with paths you can pass to read_file. " +
+    "Skips .git and node_modules, binary files, files over 1 MB, and symbolic links.",
+  risk: "read",
+  input: z.object({
+    pattern: z.string().min(1).describe("Regular expression, e.g. `function\\s+\\w+`"),
+    path: z.string().default(".").describe("File or directory to search, relative to the workspace root"),
+    include: z
+      .string()
+      .optional()
+      .describe("Glob over paths below `path`, e.g. `*.ts` (any depth) or `src/**/*.tsx`; supports * ** ? {a,b}"),
+    ignore_case: z.boolean().default(false),
+  }),
+  async run({ pattern, path: p, include, ignore_case }, { cwd, signal }) {
+    const result = await runSearch(
+      {
+        target: resolveInside(cwd, p),
+        root: path.resolve(cwd),
+        pattern,
+        ignoreCase: ignore_case,
+        include,
+        maxMatches: MAX_MATCHES,
+      },
+      { signal },
+    );
+    return formatSearchResult(result, MAX_MATCHES);
+  },
+});
+
 const MAX_OUT = 30_000;
 
 /** Credentials a parent shell may still export; commands run by the model never see them. */
@@ -99,4 +168,11 @@ function clip(s: string): string {
   return s.length > MAX_OUT ? `${s.slice(0, MAX_OUT)}\n…[truncated]` : s;
 }
 
-export const builtinTools: AnyTool[] = [readFileTool, listDirTool, writeFileTool, runCommandTool];
+export const builtinTools: AnyTool[] = [
+  readFileTool,
+  listDirTool,
+  grepTool,
+  writeFileTool,
+  editFileTool,
+  runCommandTool,
+];
