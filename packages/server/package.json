@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@albireo/core": "workspace:*",
+    "@albireo/store": "workspace:*",
     "@albireo/vault": "workspace:*"
   }
 }

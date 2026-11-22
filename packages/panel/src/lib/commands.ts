@@ -10,6 +10,7 @@ export interface CommandSpec {
 
 export const COMMANDS: readonly CommandSpec[] = [
   { name: "model", usage: "/model [provider] [model]", summary: "Switch provider or model" },
+  { name: "new", summary: "Start a new session" },
   { name: "retry", summary: "Run the last turn again" },
   { name: "changes", summary: "Show the files that changed" },
   { name: "files", summary: "Browse the workspace's files" },

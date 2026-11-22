@@ -3,7 +3,7 @@ import { attention } from "../lib/vault.ts";
 import { folderName } from "../lib/workspace.ts";
 import { vault } from "../state/secrets.ts";
 import { chat } from "../state/store.ts";
-import { paneOpen, setKeysOpen, setPaneOpen } from "../state/ui.ts";
+import { paneOpen, setKeysOpen, setPaneOpen, setSidebarOpen, sidebarOpen } from "../state/ui.ts";
 import { changes, dataOf } from "../state/workspace.ts";
 import { Logo } from "./Logo.tsx";
 import { ModelSwitcher } from "./ModelSwitcher.tsx";
@@ -19,6 +19,16 @@ export function TopBar() {
   };
   return (
     <header class="topbar">
+      <button
+        type="button"
+        class="ghost sidebar-toggle"
+        aria-pressed={sidebarOpen()}
+        aria-label={sidebarOpen() ? "Hide the sessions" : "Show the sessions"}
+        title="Sessions"
+        onClick={() => setSidebarOpen(!sidebarOpen())}
+      >
+        ☰
+      </button>
       <div class="brand">
         <Logo />
         <span>Albireo</span>

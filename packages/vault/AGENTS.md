@@ -12,7 +12,7 @@
 | `src/store.ts`       | `VaultStore`：状态机（uninitialized / locked / unlocked）、串行化写入、provider ID（内置 + 自定义）与凭据输入校验              |
 | `src/providers.ts`   | `ProviderConfigStore`：读取、严格校验并原子写入同目录下的 `providers.json`（非敏感端点、线协议、认证模式、`compat`、模型清单） |
 | `src/registry.ts`    | `createVaultRegistry` / `registerVaultProviders`、`providerProblem`、`UnconfiguredProvider`、`maskApiKey`、`redactError`       |
-| `src/manager.ts`     | `SecretManager`：把 vault、`ProviderConfigStore`、`ProviderRegistry` 和 `Session` 绑在一起，供 server 路由调用                 |
+| `src/manager.ts`     | `SecretManager`：把 vault、`ProviderConfigStore`、`ProviderRegistry` 和所有 `Session` 绑在一起，供 server 路由调用             |
 | `src/fs.ts`          | 默认目录（`defaultVaultDir`，按平台取用户级配置目录）、私有目录与原子写入                                                      |
 
 ## 两种保护模式
@@ -33,7 +33,7 @@
 - **多个进程可能同时打开同一个 vault**，例如运行中的内核和 `albireo keys`。`updateProvider` 先重新读取并解密磁盘上的文件，在它的基础上修改，不会丢掉另一个进程写入的内容。`initialize` 在磁盘上已有 vault 时拒绝执行，不会覆盖它，也不会覆盖它的主密钥。文件被换成另一个 vault（salt 不同）时，写入直接报错。没有跨进程锁：两个进程在同一毫秒级窗口里写入时，仍可能丢失其中一次。只读的内存副本不会自动刷新。
 - 锁定时把内存中的密钥 `Buffer` 清零。JS 字符串（解密后的 API key）无法清零，这是已知限制。
 - **vault 条目按 provider ID 存，不能被同 ID 的新 provider 继承**。`POST /providers`（`upsertProviderConfig`）不收 key，key 只走 `setProvider`。新建自定义 provider（磁盘上的文件没有这个 ID；内存里还有也算，比如手工删掉后还没重载，或者只因正在使用而保留）时，`ProviderConfigStore.upsert` 在严格读到文件可写之后、写入之前调用 `beforeCreate`，由 `SecretManager` 清掉 vault 里同 ID 的残留；文件有无效条目时直接失败，不碰 vault。内置 provider 的覆写不算新建。口令 vault 锁定时拒绝新建和删除（解锁就能继续，状态里的 `needsUnlock` 为 true）；vault 根本打不开（`vault.error`）时拒绝新建、允许删除：这时残留清不掉，等 vault 恢复就会被新 provider 继承；删除留下的 key 则会在下次新建时清掉。如果本进程认为 vault 尚处于 `uninitialized`、但磁盘上已有其他进程创建的 `vault.enc.json`，新建和删除也会一并拒绝直到重启。删除先删配置再删 key（完成后再刷新一次 registry 和会话）：配置写不进去时什么都没丢，key 没删掉的残留由下次新建清掉。手工从文件里删掉再手工加回同一个 ID，会沿用 vault 里的旧 key，这是已知行为。
-- `ProviderConfigStore` 的 `reload`、`upsert`、`remove` 都在同一个队列段里完成读盘和提交，不会被并发写入夹在中间，用旧内容覆盖新内容。**会话用的 provider 一定已注册**：`SecretManager` 用 `watch` 订阅 store，每次提交时同步做两件事，中间不留空档。一是问当前 provider（`keep`），文件里没有它就保留上次的定义并在 `configError` 里提示，其余改动照常生效；二是重新注册 registry 并刷新会话（`committed`）。所以提交之前切过去的 provider 会被保留，提交之后它已经注销，切换本身就会失败。会话切走后自动重载把保留的定义去掉。正在使用的 provider 删不掉：`remove` 开始前检查一次，写完文件提交前再检查一次；写文件期间被切成当前 provider 时，把文件原来的文本逐字写回（不是重新序列化）并报“正在使用”，配置、注册和 key 都不变；写回也失败时，内存跟着文件走，它变成“因正在使用而保留”（`configError` 会提示），删除照样报“正在使用”。`dispose()` 取消订阅。活跃 provider 的配置修改照常生效：空闲时立即生效，运行中则等本轮结束。`reloadProviderConfig()` 只在定义、错误或保留状态真的变化时才通知，因此可被 `GET /secrets` 反复调用。
+- `ProviderConfigStore` 的 `reload`、`upsert`、`remove` 都在同一个队列段里完成读盘和提交，不会被并发写入夹在中间，用旧内容覆盖新内容。**会话用的 provider 一定已注册**：`SecretManager` 跟踪所有会话（`track` 加一个、返回的函数去掉它；`attach` 是只跟一个的旧写法），用 `watch` 订阅 store，每次提交时同步做两件事，中间不留空档。一是问每个会话当前的 provider（`keep`，返回它们的列表，任何一个会话在用的都保留；会话被去掉后再重载一次，不再被用的就清掉），文件里没有它就保留上次的定义并在 `configError` 里提示，其余改动照常生效；二是重新注册 registry 并刷新会话（`committed`）。所以提交之前切过去的 provider 会被保留，提交之后它已经注销，切换本身就会失败。会话切走后自动重载把保留的定义去掉。正在使用的 provider 删不掉：`remove` 开始前检查一次，写完文件提交前再检查一次；写文件期间被切成当前 provider 时，把文件原来的文本逐字写回（不是重新序列化）并报“正在使用”，配置、注册和 key 都不变；写回也失败时，内存跟着文件走，它变成“因正在使用而保留”（`configError` 会提示），删除照样报“正在使用”。`dispose()` 取消订阅。活跃 provider 的配置修改照常生效：空闲时立即生效，运行中则等本轮结束。`reloadProviderConfig()` 只在定义、错误或保留状态真的变化时才通知，因此可被 `GET /secrets` 反复调用。
 
 ## 测试
 

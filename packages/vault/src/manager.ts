@@ -77,23 +77,26 @@ export interface SecretManagerOptions {
   registry: ProviderRegistry;
   /** Non-secret endpoint definitions (`providers.json`). Optional; defaults to built-in providers only. */
   config?: ProviderConfigStore;
-  /** Refreshed after every change, immediately when idle, otherwise once the running turn ends. */
+  /**
+   * A session to keep in step with the providers (same as calling `attach`). More sessions can be
+   * added with `track`.
+   */
   session?: Session;
   factories?: Partial<Record<ProviderId, ProviderFactory>>;
 }
 
 /**
- * Ties the vault and provider config store to a live registry and session: every change
- * re-registers the providers and refreshes the session. All inputs are validated here, since they
- * arrive as JSON from the panel.
+ * Ties the vault and provider config store to a live registry and its sessions: every change
+ * re-registers the providers and refreshes every session (at once when it is idle, otherwise once
+ * its running turn ends). All inputs are validated here, since they arrive as JSON from the panel.
  */
 export class SecretManager {
   readonly vault: VaultStore;
   readonly config?: ProviderConfigStore;
   private readonly registry: ProviderRegistry;
   private readonly factories: Partial<Record<ProviderId, ProviderFactory>>;
-  private session?: Session;
-  private offSession?: () => void;
+  /** Every session that follows the providers, with what stops listening to it. */
+  private readonly sessions = new Map<Session, () => void>();
   private pendingRefresh = false;
   private changeSeq = 0;
   private listeners = new Set<() => void>();
@@ -108,18 +111,25 @@ export class SecretManager {
     // can only ever pick a registered provider; and the active one stays defined even if
     // providers.json drops it, so the session can always refresh.
     this.unwatch = this.config?.watch({
-      keep: () => this.session?.providerId,
+      keep: () => [...this.sessions.keys()].map((s) => s.providerId),
       committed: () => this.changed(),
     });
     if (opts.session) this.attach(opts.session);
   }
 
+  /** Follows only `session`: whatever was followed before is let go. */
   attach(session: Session): void {
-    this.offSession?.();
-    this.session = session;
-    this.offSession = session.on((e) => {
+    for (const off of this.sessions.values()) off();
+    this.sessions.clear();
+    this.track(session);
+  }
+
+  /** Also follows `session`. Returns a function that stops following it (e.g. when it is closed). */
+  track(session: Session): () => void {
+    if (this.sessions.has(session)) return () => this.untrack(session);
+    const off = session.on((e) => {
       if (e.type === "status" && e.state === "idle" && this.pendingRefresh) {
-        this.refreshSession();
+        this.refreshSessions();
         this.notify();
       }
       // A provider kept only because it was active can go once the session has moved on.
@@ -127,11 +137,23 @@ export class SecretManager {
         this.reloadProviderConfig().catch(() => {});
       }
     });
+    this.sessions.set(session, off);
+    return () => this.untrack(session);
+  }
+
+  private untrack(session: Session): void {
+    const off = this.sessions.get(session);
+    if (!off) return;
+    off();
+    this.sessions.delete(session);
+    // The provider it was keeping may have been dropped by the file in the meantime.
+    if (this.config?.retained.size) this.reloadProviderConfig().catch(() => {});
   }
 
   dispose(): void {
     this.unwatch?.();
-    this.offSession?.();
+    for (const off of this.sessions.values()) off();
+    this.sessions.clear();
     this.listeners.clear();
   }
 
@@ -144,11 +166,13 @@ export class SecretManager {
   status(): SecretsStatus {
     const vault = this.vault;
     const secrets = vault.state === "unlocked" ? vault.read() : null;
-    const active = this.session?.providerId;
-    const retained = active && this.config?.retained.has(active) ? active : undefined;
+    const inUse = new Set([...this.sessions.keys()].map((s) => s.providerId));
+    const retained = [...(this.config?.retained ?? [])].filter((id) => inUse.has(id));
     const configError = [
-      retained
-        ? `Active provider "${retained}" is no longer in providers.json; it stays available until you switch to another provider.`
+      retained.length > 0
+        ? `Active provider${retained.length > 1 ? "s" : ""} ${retained.map((id) => `"${id}"`).join(", ")} ${
+            retained.length > 1 ? "are" : "is"
+          } no longer in providers.json; ${retained.length > 1 ? "they stay" : "it stays"} available until you switch to another provider.`
         : undefined,
       this.config?.error,
     ]
@@ -378,20 +402,22 @@ export class SecretManager {
   private changed(): void {
     this.changeSeq++;
     registerVaultProviders(this.registry, this.vault, this.factories, this.config);
-    this.refreshSession();
+    this.refreshSessions();
     this.notify();
   }
 
-  private refreshSession(): void {
-    const session = this.session;
-    if (!session) return;
-    if (session.status === "running") {
-      this.pendingRefresh = true;
-      return;
+  /** Refreshes every idle session; a session in the middle of a turn waits for it to end. */
+  private refreshSessions(): void {
+    let waiting = false;
+    for (const session of this.sessions.keys()) {
+      if (session.status === "running") {
+        waiting = true;
+        continue;
+      }
+      // Never throws for an unknown provider: the config watcher keeps every active one registered.
+      session.refreshProvider();
     }
-    this.pendingRefresh = false;
-    // Never throws for an unknown provider: the config watcher keeps the active one registered.
-    session.refreshProvider();
+    this.pendingRefresh = waiting;
   }
 
   private notify(): void {

@@ -57,11 +57,11 @@ export interface ProvidersFile {
 /** Something that follows the store's commits, e.g. `SecretManager` for its registry and session. */
 export interface ProviderConfigWatcher {
   /**
-   * A custom provider in use (the session's active one). It stays defined even if the file drops
-   * it, so it is never unregistered while in use, and `remove` refuses it. Asked at every commit;
-   * a kept entry goes away at the first commit after another provider is named.
+   * The custom providers in use (each session's active one). They stay defined even if the file
+   * drops them, so none is unregistered while in use, and `remove` refuses them. Asked at every
+   * commit; a kept entry goes away at the first commit after no one names it.
    */
-  keep?(): ProviderId | undefined;
+  keep?(): ProviderId | readonly ProviderId[] | undefined;
   /** Called right after every commit that changed something, before anything else can run. */
   committed?(): void;
 }
@@ -323,8 +323,10 @@ export class ProviderConfigStore {
   private inUse(): Set<ProviderId> {
     const ids = new Set<ProviderId>();
     for (const watcher of this.watchers) {
-      const id = watcher.keep?.();
-      if (id && !isBuiltinProviderId(id)) ids.add(id);
+      const kept = watcher.keep?.();
+      for (const id of typeof kept === "string" ? [kept] : (kept ?? [])) {
+        if (id && !isBuiltinProviderId(id)) ids.add(id);
+      }
     }
     return ids;
   }

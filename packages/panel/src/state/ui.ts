@@ -1,5 +1,12 @@
 import { createSignal } from "solid-js";
 
+/** 0 while the page has not been laid out yet (it says nothing then, so it counts as a wide screen). */
+const viewportWidth = () => window.innerWidth;
+export function isNarrow(): boolean {
+  const w = viewportWidth();
+  return w > 0 && w <= 900;
+}
+
 export const [keysOpen, setKeysOpen] = createSignal(false);
 
 /** Whether the conversation follows new output. The composer sets it when the user sends. */
@@ -22,6 +29,33 @@ let requests = 0;
 export function requestComposerText(text: string): void {
   setComposerRequest({ text, n: ++requests });
 }
+
+// ---- sessions sidebar and the "new session" dialog -----------------------------------------------
+
+const SIDEBAR_PREF = "albireo.sidebar";
+
+function readSidebarPref(): boolean | undefined {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_PREF);
+    return raw === "open" ? true : raw === "closed" ? false : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const [sidebar, setSidebar] = createSignal(readSidebarPref() ?? !isNarrow());
+export const sidebarOpen = sidebar;
+export function setSidebarOpen(value: boolean): void {
+  setSidebar(value);
+  try {
+    localStorage.setItem(SIDEBAR_PREF, value ? "open" : "closed");
+  } catch {
+    // Storage can be blocked; the sidebar just forgets its state on reload.
+  }
+  if (value && narrow()) setOpen(false);
+}
+
+export const [newSessionOpen, setNewSessionOpen] = createSignal(false);
 
 // ---- model switcher (opened by `/model`) -------------------------------------------------------
 
@@ -53,8 +87,11 @@ function writePref(value: { open: boolean; wide: boolean }): void {
 
 const saved = readPref();
 /** Open by default when there is room for it beside the conversation. */
-const [open, setOpen] = createSignal(saved.open ?? window.innerWidth >= 1100);
+const [open, setOpen] = createSignal(saved.open ?? (viewportWidth() === 0 || viewportWidth() >= 1100));
 const [wide, setWide] = createSignal(saved.wide === true);
+
+/** On a narrow screen the sidebar and the pane cover the conversation, so only one of them is open at a time. */
+const narrow = isNarrow;
 
 export const paneOpen = open;
 export const paneWide = wide;
@@ -63,6 +100,7 @@ export const [paneTab, setPaneTab] = createSignal<PaneTab>("changes");
 export function setPaneOpen(value: boolean): void {
   setOpen(value);
   writePref({ open: value, wide: wide() });
+  if (value && narrow()) setSidebarOpen(false);
 }
 export function setPaneWide(value: boolean): void {
   setWide(value);

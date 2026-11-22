@@ -399,6 +399,26 @@ test("a panel that connects to a continued session is shown the earlier conversa
           ["assistant_end", "the earlier answer"],
         ],
       );
+
+      // The panel can also see this session in the list and start another one beside it.
+      const headers = { "x-albireo-token": new URL(url).searchParams.get("token") };
+      const listed = await (await fetch(new URL("/sessions", url), { headers })).json();
+      assert.equal(listed.canCreate, true);
+      assert.deepEqual(
+        listed.sessions.map((x) => [x.live, x.title, x.cwd]),
+        [[true, "the earlier question", s.cwd]],
+      );
+      assert.equal(listed.primary, listed.sessions[0].id);
+
+      const made = await fetch(new URL("/sessions", url), {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ cwd: s.cwd }),
+      });
+      assert.equal(made.status, 200);
+      const after = await (await fetch(new URL("/sessions", url), { headers })).json();
+      assert.equal(after.sessions.length, 2);
+      assert.equal(after.primary, listed.primary, "the continued session is still the default");
     } finally {
       child.kill();
     }
