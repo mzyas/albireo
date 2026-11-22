@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/vault" },
     { "path": "packages/server" },
+    { "path": "packages/panel" },
     { "path": "packages/cli" }
   ]
 }
