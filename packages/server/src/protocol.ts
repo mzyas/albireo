@@ -106,3 +106,16 @@ export interface SessionFailure {
   error: string;
   code: "invalid" | "not_found" | "unsupported";
 }
+
+/**
+ * What the desktop app's window gives the page as `window.albireo` (the page is also opened in plain
+ * browsers, where there is none). Not an HTTP route: the shell and the page agree on this shape, and
+ * nothing here reaches the file system except through the shell's own checks.
+ */
+export interface DesktopBridge {
+  /**
+   * Shows the system's folder picker and resolves to the folder chosen, or null if it was cancelled.
+   * `startIn` (an absolute path) is where the picker opens.
+   */
+  pickDirectory(startIn?: string): Promise<string | null>;
+}

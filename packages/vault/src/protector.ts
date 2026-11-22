@@ -5,7 +5,9 @@ import { writeFileAtomic } from "./fs.js";
 
 /**
  * Holds the vault's 256-bit master key in an OS credential store. One interface so another
- * backend (e.g. Electron `safeStorage`) can be dropped in later.
+ * backend can be dropped in later. Not Electron's `safeStorage`: only an Electron process can read
+ * what it wrote, so the command line could no longer open a vault the desktop app made (and the
+ * other way round). The desktop app uses `defaultProtector` like the command line does.
  */
 export interface KeyProtector {
   /** Human-readable name, e.g. "Windows DPAPI". */

@@ -1221,6 +1221,17 @@ dialog.new-session {
 dialog.new-session .stack {
   grid-template-columns: minmax(0, 1fr);
 }
+.path-row {
+  display: flex;
+  gap: 8px;
+}
+.path-field {
+  flex: 1;
+  min-width: 0;
+}
+.path-row button {
+  flex: none;
+}
 .recent {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

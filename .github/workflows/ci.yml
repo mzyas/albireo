@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Nothing in CI starts Electron (its types come with the npm package), so its ~100 MB binary is not downloaded.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

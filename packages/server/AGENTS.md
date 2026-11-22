@@ -1,6 +1,6 @@
 # @albireo/server
 
-`src/index.ts` 导出 `startPanelServer(source, opts)`，把运行中的会话暴露给 GUI 面板：`source` 是 `SessionManager`（多个会话），或者一个 `Session`（当作唯一的会话，用 `SessionManager.single` 包起来）。`src/manager.ts` 是 `SessionManager`。`src/workspace.ts` 是工作区的只读视图（git 变更、diff、文件列表、预览）；`src/protocol.ts` 只放这些路由的响应类型（无任何导入），经 `@albireo/server/protocol` 子路径导出给面板做类型导入。
+`src/index.ts` 导出 `startPanelServer(source, opts)`，把运行中的会话暴露给 GUI 面板：`source` 是 `SessionManager`（多个会话），或者一个 `Session`（当作唯一的会话，用 `SessionManager.single` 包起来）。`src/manager.ts` 是 `SessionManager`。`src/workspace.ts` 是工作区的只读视图（git 变更、diff、文件列表、预览）；`src/dirs.ts` 是已保存会话的目录（`defaultSessionsDir`，命令行和桌面应用共用）；`src/protocol.ts` 只放面板和宿主之间约定的类型（无任何导入）：这些路由的响应，以及 Electron 外壳注入给页面的 `DesktopBridge`（不是 HTTP 路由），经 `@albireo/server/protocol` 子路径导出给面板和外壳做类型导入。
 
 ## 协议
 
@@ -26,10 +26,11 @@ Agent 能执行任意命令，所以这个服务必须锁死：
 
 会话路由和 `SessionManager` 额外要求：
 
-- **工作区来自请求，所以要检查**：`checkWorkspace` 要求绝对路径、存在、是目录、不是文件系统根（驱动器根）；错误消息不引用路径。能把 Agent 指向用户能访问的任何文件夹，这是 token 和回环检查在把关，管理器本身不限制。**面板没有目录浏览接口**（只能选用过的或输入路径）：Web 页面不该拿到文件系统，原生选择器等 Electron 外壳再做，不要为此放宽接口。
+- **工作区来自请求，所以要检查**：`checkWorkspace` 要求绝对路径、存在、是目录、不是文件系统根（驱动器根）；错误消息不引用路径。能把 Agent 指向用户能访问的任何文件夹，这是 token 和回环检查在把关，管理器本身不限制。**服务端没有目录浏览接口**：Web 页面不该拿到文件系统。普通浏览器里只能选用过的或输入路径；桌面应用的窗口另给页面一个原生选择器（`DesktopBridge.pickDirectory`，在外壳进程里弹系统对话框，只返回用户选的那一个路径），选出来的路径照样走这里的检查。不要为了选文件夹放宽接口。
 - 会话 id 来自 URL，要走存储的 `assertValidId`（路径分隔符、设备名等）；`open` 对同一个 id 并发只恢复一次（否则两个录制器写同一个文件）；`delete` 先中止并等这一轮结束、停录制、等写完，再删文件。
 - 恢复的会话回到自己的工作区，那个目录没了就报错；命令行可以用 `open(id, overrides)` 覆盖工作区、provider 和 model，HTTP 不开放这个。
 - 新建会话用的 provider 必须已注册；错误只返回管理器自己写的消息，其余一律 `internal error`。
+- `startPanelServer` 绑定失败（比如端口被占用）时，已经挂到管理器和 `SecretManager` 上的监听要摘掉再抛错：调用方（桌面应用）会换一个端口重试，不能留下重复的监听。
 
 `/workspace/*` 路由额外要求（它们会在用户刚打开的、不一定可信的仓库里跑 git）：
 

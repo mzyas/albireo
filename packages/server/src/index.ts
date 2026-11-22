@@ -7,6 +7,7 @@ import { type SecretManager, VaultError, type VaultErrorCode } from "@albireo/va
 import { type ManagedSession, ManagerError, type ManagerErrorCode, SessionManager } from "./manager.js";
 import { Workspace, WorkspaceError } from "./workspace.js";
 
+export { defaultSessionsDir } from "./dirs.js";
 export {
   type ManagedSession,
   ManagerError,
@@ -407,19 +408,28 @@ export async function startPanelServer(
     }
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(opts.port ?? 0, "127.0.0.1", () => resolve());
-  });
+  const unsubscribe = () => {
+    offSecrets?.();
+    offChange();
+    offRemoved();
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(opts.port ?? 0, "127.0.0.1", () => resolve());
+    });
+  } catch (err) {
+    // A port that is taken must not leave this server's listeners on the manager: the caller may retry.
+    unsubscribe();
+    throw err;
+  }
   port = (server.address() as AddressInfo).port;
 
   return {
     url: `http://127.0.0.1:${port}/?token=${token}`,
     close: () =>
       new Promise<void>((resolve) => {
-        offSecrets?.();
-        offChange();
-        offRemoved();
+        unsubscribe();
         server.closeAllConnections();
         server.close(() => resolve());
       }),

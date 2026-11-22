@@ -1,7 +1,6 @@
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { type ListFilter, type LoadedSession, type SessionMeta, type SessionStore, StoreError } from "@albireo/store";
-import { defaultVaultDir } from "@albireo/vault";
 
 export const SESSIONS_HELP = `albireo sessions — list and delete saved conversations
 
@@ -18,10 +17,8 @@ Continue one with \`albireo --continue\` (the latest of this workspace) or \`alb
   -h, --help
 `;
 
-/** Where conversations are kept: beside the vault, never inside a workspace. */
-export function defaultSessionsDir(): string {
-  return path.join(defaultVaultDir(), "sessions");
-}
+// Where conversations are kept (beside the vault, never inside a workspace) is shared with the desktop app.
+export { defaultSessionsDir } from "@albireo/server";
 
 export interface SessionsIO {
   stdout(text: string): void;

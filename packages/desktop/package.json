@@ -1,0 +1,21 @@
+{
+  "name": "@albireo/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Electron shell: runs the kernel and shows the panel in a desktop window, with a native folder picker.",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "@albireo/core": "workspace:*",
+    "@albireo/server": "workspace:*",
+    "@albireo/store": "workspace:*",
+    "@albireo/vault": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1"
+  }
+}

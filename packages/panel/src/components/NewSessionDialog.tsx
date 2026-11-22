@@ -1,12 +1,14 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
+import { desktopBridge } from "../desktop.ts";
+import { errorMessage } from "../lib/format.ts";
 import { folderName } from "../lib/workspace.ts";
 import { sessions, startSession } from "../state/sessions.ts";
 import { chat } from "../state/store.ts";
 
 /**
- * Starts a session in a workspace: one used before (a click), or any absolute path (typed). The server
- * checks that it is a real folder. There is no folder browser here: a web page can't be handed the
- * file system, and the desktop app will bring a native picker.
+ * Starts a session in a workspace: one used before (a click), any absolute path (typed), or, in the
+ * desktop app, a folder from the system's picker. The server checks that it is a real folder. A plain
+ * browser has no folder browser: a web page can't be handed the file system.
  */
 export function NewSessionDialog(props: { open: boolean; onClose: () => void }) {
   let dialog!: HTMLDialogElement;
@@ -14,6 +16,21 @@ export function NewSessionDialog(props: { open: boolean; onClose: () => void }) 
   const [cwd, setCwd] = createSignal("");
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  // Only the desktop app's window has the picker.
+  const bridge = desktopBridge();
+
+  async function browse() {
+    if (!bridge) return;
+    try {
+      const folder = await bridge.pickDirectory(cwd().trim() || undefined);
+      if (folder) {
+        setCwd(folder);
+        setError("");
+      }
+    } catch (err) {
+      setError(`The folder picker could not be opened (${errorMessage(err)}).`);
+    }
+  }
 
   const recent = () => (sessions()?.workspaces ?? []).slice(0, 6);
 
@@ -63,16 +80,24 @@ export function NewSessionDialog(props: { open: boolean; onClose: () => void }) 
           </button>
         </div>
         <label for="new-session-cwd">Workspace folder</label>
-        <input
-          id="new-session-cwd"
-          ref={field}
-          list="new-session-recent"
-          autocomplete="off"
-          spellcheck={false}
-          placeholder="An absolute path, e.g. D:\work\project"
-          value={cwd()}
-          onInput={(e) => setCwd(e.currentTarget.value)}
-        />
+        <div class="path-row">
+          <input
+            id="new-session-cwd"
+            class="path-field"
+            ref={field}
+            list="new-session-recent"
+            autocomplete="off"
+            spellcheck={false}
+            placeholder="An absolute path, e.g. D:\work\project"
+            value={cwd()}
+            onInput={(e) => setCwd(e.currentTarget.value)}
+          />
+          <Show when={bridge}>
+            <button type="button" onClick={browse}>
+              Browse…
+            </button>
+          </Show>
+        </div>
         <datalist id="new-session-recent">
           <For each={recent()}>{(w) => <option value={w} />}</For>
         </datalist>
