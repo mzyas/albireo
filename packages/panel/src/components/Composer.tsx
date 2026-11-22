@@ -5,11 +5,15 @@ import { formatTokens } from "../lib/format.ts";
 import { splitPath } from "../lib/workspace.ts";
 import { abortTurn, sendMessage } from "../state/actions.ts";
 import { runSlashCommand } from "../state/commands.ts";
+import { recall, remember } from "../state/composerMemory.ts";
+import { activeId } from "../state/sessions.ts";
 import { chat } from "../state/store.ts";
 import { composerRequest, registerComposer, setStickToBottom } from "../state/ui.ts";
 import { fetchFiles } from "../state/workspace.ts";
 
 const MAX_HEIGHT = 220;
+/** Narrower than this (its own padding is 16) the box has not been laid out. */
+const MIN_MEASURABLE_WIDTH = 40;
 const MENU_ITEMS = 8;
 
 interface MenuItem {
@@ -88,7 +92,19 @@ export function Composer() {
   onMount(() => {
     registerComposer(input);
     input.focus();
-    onCleanup(() => registerComposer(undefined));
+    // The text wraps differently when the box gets wider or narrower (the window, the sidebar or the
+    // pane changed), so its height is worked out again then.
+    let width = 0;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      resize();
+    });
+    observer.observe(input);
+    onCleanup(() => {
+      observer.disconnect();
+      registerComposer(undefined);
+    });
   });
 
   // "Edit" on the last message puts its text back here.
@@ -105,6 +121,12 @@ export function Composer() {
   );
 
   function resize() {
+    // A box that has not been laid out yet (no width) wraps every letter onto its own line and would
+    // measure itself far too tall: leave its height to the stylesheet until it has a width.
+    if (input.clientWidth < MIN_MEASURABLE_WIDTH) {
+      input.style.height = "";
+      return;
+    }
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, MAX_HEIGHT)}px`;
   }
@@ -143,12 +165,28 @@ export function Composer() {
     else void sendMessage(value);
   }
 
+  // Each session keeps its own half-written message and its own queue.
+  createEffect(
+    on(activeId, (id, previous) => {
+      if (previous) remember(previous, { text: text(), queue: queue() });
+      const saved = recall(id);
+      setText(saved.text);
+      input.value = saved.text;
+      setCaret(saved.text.length);
+      setQueue(saved.queue);
+      // Not on the first run: the box may have no width yet, and would measure itself far too tall.
+      if (previous !== undefined) resize();
+    }),
+  );
+
+  // Queued messages go out when their session is shown, has been heard from, and is idle: a session
+  // that has not said whether it is running yet (just switched to) must not be sent to blind.
   createEffect(
     on(
-      () => chat.status,
-      (status) => {
+      () => [chat.ready, chat.status] as const,
+      ([ready, status]) => {
         const [next, ...rest] = queue();
-        if (status !== "idle" || next === undefined) return;
+        if (!ready || status !== "idle" || next === undefined) return;
         setQueue(rest);
         void sendMessage(next);
       },

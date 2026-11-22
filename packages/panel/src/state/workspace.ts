@@ -1,7 +1,7 @@
 // What the side pane shows: the workspace's changes, one file's diff, the file list and a file preview.
 // All of it is read from the server's /workspace routes; nothing here changes the workspace.
 import { createSignal } from "solid-js";
-import { api } from "../api.ts";
+import { api, forSession } from "../api.ts";
 import { errorMessage } from "../lib/format.ts";
 import type { ChangedFile, Changes, FileDiff, FileList, FilePreview, ServerEvent } from "../protocol.ts";
 
@@ -50,7 +50,7 @@ export async function refreshChanges(): Promise<void> {
   const before = changes();
   setChanges({ state: "loading", data: before.state === "idle" ? undefined : before.data });
   try {
-    const data = await api<Changes>("/workspace/changes");
+    const data = await api<Changes>(forSession("/workspace/changes"));
     if (!changesRequests.current(id)) return;
     setChanges({ state: "ready", data });
     // The file being looked at may have changed again.
@@ -66,7 +66,7 @@ async function loadDiff(file: ChangedFile, showLoading: boolean): Promise<void> 
   const id = diffRequests.next();
   if (showLoading) setDiff({ state: "loading" });
   try {
-    const data = await api<FileDiff>(`/workspace/diff?${q({ path: file.path, from: file.from })}`);
+    const data = await api<FileDiff>(forSession(`/workspace/diff?${q({ path: file.path, from: file.from })}`));
     if (diffRequests.current(id)) setDiff({ state: "ready", data });
   } catch (err) {
     if (diffRequests.current(id)) setDiff({ state: "error", error: errorMessage(err) });
@@ -125,7 +125,7 @@ let listTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Files matching `query`, best first. Used by the file list and by `@` in the message box. */
 export function fetchFiles(query: string, limit: number): Promise<FileList> {
-  return api<FileList>(`/workspace/files?${q({ q: query, limit: String(limit) })}`);
+  return api<FileList>(forSession(`/workspace/files?${q({ q: query, limit: String(limit) })}`));
 }
 
 /** Searches the file list; typing in quick succession makes one request. */
@@ -154,9 +154,27 @@ export async function openFile(path: string | null): Promise<void> {
   }
   setPreview({ state: "loading" });
   try {
-    const data = await api<FilePreview>(`/workspace/file?${q({ path })}`);
+    const data = await api<FilePreview>(forSession(`/workspace/file?${q({ path })}`));
     if (previewRequests.current(id)) setPreview({ state: "ready", data });
   } catch (err) {
     if (previewRequests.current(id)) setPreview({ state: "error", error: errorMessage(err) });
   }
+}
+
+/** Forgets everything about the workspace that was shown: another session is about to be. */
+export function resetWorkspace(): void {
+  changesRequests.next();
+  diffRequests.next();
+  listRequests.next();
+  previewRequests.next();
+  clearTimeout(refreshTimer);
+  clearTimeout(listTimer);
+  mayChange.clear();
+  setChanges(idle);
+  setSelectedChange(null);
+  setDiff(idle);
+  setFileQuery("");
+  setFileList(idle);
+  setPreviewPath(null);
+  setPreview(idle);
 }

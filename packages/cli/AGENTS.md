@@ -8,12 +8,13 @@
   - 无头模式（`--prompt`）：把输出流式写到 stdout，自动拒绝所有需要审批的调用，跑完退出。
   - `albireo keys …`：第一个参数是 `keys` 时，在解析主参数之前分流到 `runKeysCommand`，不启动 Session。不开面板也能查看、设置、清除 vault 里的凭据，例如只能 SSH 登录、没有浏览器的机器。
 - `--yolo` 把 `autoApprove` 扩大到全部风险等级；默认只放行 `read`。
+- **会话由 server 的 `SessionManager` 管**：CLI 把 registry、工具、`autoApprove`、存储交给它，再用 `create` 或 `open` 起第一个会话（`--resume` / `--continue` 走 `open`，并用命令行的 `--cwd`、`--provider`、`--model` 覆盖会话原来的），面板可以在同一个进程里再起别的。`--cwd` 必须是存在的目录且不是文件系统根（管理器的检查），否则报错退出。服务模式下每个会话的工具调用和审批请求都打在 stderr 上，同时有多个会话时带上工作区文件夹名。`SecretManager` 通过 `manager.each` 跟踪每个会话，面板里存的 key 对它们全部生效。
 - **会话默认保存**（`@albireo/store`），存在用户配置目录下的 `sessions/`（`defaultSessionsDir()`，永远不在工作区里）。参数以 `HELP` 为准。
-  - 启动时先决定恢复哪个会话（`chooseSession`），再决定 provider：显式的 `--provider` 优先，否则回到会话用过的 provider（它已经不存在就提示并用默认的）。model 只在和默认值不同时才带回来，这样不会把模型"钉死"，之后改 vault 里的 model 覆写仍然生效。
+  - 启动时先决定恢复哪个会话（`chooseSession`），再用 server 导出的 `resumeChoice` 决定 provider 和 model（面板里打开会话用的是同一个函数）：显式的 `--provider` 优先，否则回到会话用过的 provider（它已经不存在就提示并用默认的）。model 只在和默认值不同时才带回来，这样不会把模型"钉死"，之后改 vault 里的 model 覆写仍然生效。
   - `--resume <id>` 找不到或 id 不合法是错误（退出码 1）；`--continue` 没有可接的会话就提示一句并开新会话。两者同时给是用法错误（退出码 2）。
   - 恢复的会话和当前 `--cwd` 不是同一个目录时只提示，不替用户换目录。
   - `--no-save` 不录制，但仍可以接着一个已保存的会话聊，且不改动它。
-  - 退出前（无头模式跑完、服务模式收到 SIGINT/SIGTERM）必须 `await recording.flush()`，否则最后几条消息可能还没写完。写盘失败只提示一次，对话继续。
+  - 退出前（无头模式跑完、服务模式收到 SIGINT/SIGTERM）必须 `await manager.flush()`，否则最后几条消息可能还没写完。写盘失败只提示一次，对话继续。
   - 子命令 `albireo sessions` 和 `keys` 一样，在解析主参数之前分流。
 - 启动时用 core 的 `loadInstructions(cwd)` 读工作区的 `AGENTS.md`，交给 `Session`（面板的 Context 页能看到它是否生效）。
 - Provider 来自 `@albireo/vault` 的 `createVaultRegistry()`，凭据存在加密 vault，非敏感端点定义存在同目录的 `providers.json`（`ProviderConfigStore.open()`），**不读环境变量**。启动时同时打开两者，再把 `SecretManager` 交给面板服务。

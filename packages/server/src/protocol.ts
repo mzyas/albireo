@@ -57,3 +57,52 @@ export interface WorkspaceFailure {
   error: string;
   code?: "invalid" | "not_found";
 }
+
+// ---- sessions ---------------------------------------------------------------------------------
+
+/** One row of the session list: a session running in this server, or one saved on disk. */
+export interface SessionSummary {
+  id: string;
+  /** The first thing the user said; empty before they have said anything. */
+  title: string;
+  /** The workspace the session works in. */
+  cwd: string;
+  provider: string;
+  model: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+  /** In memory in this server. A saved session that is not live is opened before it can be used. */
+  live: boolean;
+  /** Only live sessions run; the rest are idle. */
+  status: "idle" | "running";
+  /** Tool calls waiting for an answer (live sessions only). */
+  pending: number;
+}
+
+/** `GET /sessions` */
+export interface SessionsResponse {
+  /** Newest first. */
+  sessions: SessionSummary[];
+  /** Workspaces the user has used, most recent first: a choice for a new session. */
+  workspaces: string[];
+  /** What a request without a `session` means; null when nothing is running. */
+  primary: string | null;
+  /** False when the server runs one fixed session and can't start or open others. */
+  canCreate: boolean;
+  /** The workspace a new session starts in unless told otherwise. */
+  cwd: string;
+}
+
+/** `POST /sessions`: every field is optional. */
+export interface CreateSessionBody {
+  cwd?: string;
+  provider?: string;
+  model?: string;
+}
+
+/** Every session route answers `{ error, code }` with a 4xx status when it can't do what was asked. */
+export interface SessionFailure {
+  error: string;
+  code: "invalid" | "not_found" | "unsupported";
+}

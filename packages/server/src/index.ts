@@ -4,8 +4,19 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Session } from "@albireo/core";
 import { type SecretManager, VaultError, type VaultErrorCode } from "@albireo/vault";
+import { type ManagedSession, ManagerError, type ManagerErrorCode, SessionManager } from "./manager.js";
 import { Workspace, WorkspaceError } from "./workspace.js";
 
+export {
+  type ManagedSession,
+  ManagerError,
+  type ManagerErrorCode,
+  type ManagerOptions,
+  type OpenOverrides,
+  type ResumeChoice,
+  resumeChoice,
+  SessionManager,
+} from "./manager.js";
 export type * from "./protocol.js";
 
 export interface PanelServerOptions {
@@ -61,17 +72,25 @@ function replyJson(res: http.ServerResponse, status: number, body: unknown): voi
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
 }
 
-async function readJsonObject(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+function parseJsonObject(
+  text: string,
+  fail: (message: string) => Error = (message) => new VaultError("invalid", message),
+): Record<string, unknown> {
   let value: unknown;
   try {
-    value = JSON.parse(await readBody(req));
+    value = JSON.parse(text);
   } catch {
     // Not the parser's message: it quotes the body, which may hold a key.
-    throw new VaultError("invalid", "The request body must be JSON.");
+    throw fail("The request body must be JSON.");
   }
-  if (typeof value !== "object" || value === null)
-    throw new VaultError("invalid", "The request body must be an object.");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw fail("The request body must be an object.");
+  }
   return value as Record<string, unknown>;
+}
+
+async function readJsonObject(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return parseJsonObject(await readBody(req));
 }
 
 /**
@@ -167,20 +186,105 @@ async function handleWorkspace(res: http.ServerResponse, url: URL, workspace: Wo
   }
 }
 
+const SESSION_STATUS: Record<ManagerErrorCode, number> = { invalid: 400, not_found: 404, unsupported: 409 };
+
+function optionalString(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new ManagerError("invalid", `${key} must be text.`);
+  return value;
+}
+
 /**
- * Local-only bridge between a running Session and the GUI panel.
+ * Routes for the sessions a server runs: list them, start one in a workspace, bring a saved one back,
+ * delete one. Called after the Host and token checks, like every other route. Failures answer with the
+ * manager's own message (written for the user) or a bare `internal error`, never paths or file contents.
+ */
+async function handleSessions(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  manager: SessionManager,
+): Promise<void> {
+  try {
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length === 1 && req.method === "GET") {
+      replyJson(res, 200, await manager.list());
+      return;
+    }
+    if (parts.length === 1 && req.method === "POST") {
+      // No body at all means "a new session with the defaults".
+      const raw = await readBody(req);
+      const fail = (message: string) => new ManagerError("invalid", message);
+      const body = raw.trim() === "" ? {} : parseJsonObject(raw, fail);
+      const managed = await manager.create({
+        cwd: optionalString(body, "cwd"),
+        provider: optionalString(body, "provider"),
+        model: optionalString(body, "model"),
+      });
+      replyJson(res, 200, { session: manager.summarize(managed) });
+      return;
+    }
+    let id = "";
+    try {
+      id = decodeURIComponent(parts[1] ?? "");
+    } catch {
+      throw new ManagerError("invalid", "Invalid session id.");
+    }
+    if (parts.length === 3 && parts[2] === "open" && req.method === "POST") {
+      replyJson(res, 200, { session: manager.summarize(await manager.open(id)) });
+      return;
+    }
+    if (parts.length === 2 && req.method === "DELETE") {
+      await manager.delete(id);
+      replyJson(res, 200, {});
+      return;
+    }
+    replyJson(res, 404, { error: "not found" });
+  } catch (err) {
+    if (err instanceof ManagerError) replyJson(res, SESSION_STATUS[err.code], { error: err.message, code: err.code });
+    else replyJson(res, 500, { error: "internal error" });
+  }
+}
+
+/**
+ * Local-only bridge between the running sessions and the GUI panel. Hand it a `SessionManager` to
+ * serve several sessions, or a single `Session`, which is served as the only one.
  * The agent can execute commands, so the server is locked down: loopback bind,
  * Host-header check (DNS rebinding), and a per-run secret token on every request.
  */
-export async function startPanelServer(session: Session, opts: PanelServerOptions = {}): Promise<PanelServer> {
+export async function startPanelServer(
+  source: Session | SessionManager,
+  opts: PanelServerOptions = {},
+): Promise<PanelServer> {
+  const manager = source instanceof SessionManager ? source : SessionManager.single(source);
   const token = randomBytes(24).toString("hex");
   const publicDir = opts.publicDir ?? new URL("../../panel/dist/", import.meta.url);
   let port = 0;
-  const workspace = new Workspace(session.cwd);
-  // Vault changes aren't session events; tell every connected panel to re-fetch GET /secrets.
-  const streams = new Set<http.ServerResponse>();
-  const offSecrets = opts.secrets?.onChange(() => {
-    for (const s of streams) s.write(`data: ${JSON.stringify({ type: "secrets_changed" })}\n\n`);
+  const workspaces = new Map<string, Workspace>();
+  const workspaceOf = (m: ManagedSession) => {
+    const known = workspaces.get(m.session.cwd);
+    if (known) return known;
+    const workspace = new Workspace(m.session.cwd);
+    workspaces.set(m.session.cwd, workspace);
+    return workspace;
+  };
+  /** The session a request means: the one it names, or the first one when it names none. */
+  const target = (id: unknown): ManagedSession | undefined =>
+    typeof id === "string" && id !== "" ? manager.get(id) : manager.primary;
+  const noSuchSession = (res: http.ServerResponse) =>
+    replyJson(res, 404, { error: "No such session.", code: "not_found" });
+
+  // Changes that aren't session events: tell every connected panel to re-fetch (`GET /secrets`,
+  // `GET /sessions`), and end the stream of a session that is gone.
+  const streams = new Set<{ res: http.ServerResponse; session: string }>();
+  const broadcast = (type: string) => {
+    for (const s of streams) s.res.write(`data: ${JSON.stringify({ type })}\n\n`);
+  };
+  const offSecrets = opts.secrets?.onChange(() => broadcast("secrets_changed"));
+  const offChange = manager.onChange(() => broadcast("sessions_changed"));
+  const offRemoved = manager.onRemoved((m) => {
+    for (const s of [...streams]) if (s.session === m.id) s.res.end();
   });
 
   const server = http.createServer(async (req, res) => {
@@ -213,6 +317,11 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
       }
 
       if (req.method === "GET" && url.pathname === "/events") {
+        const managed = target(url.searchParams.get("session"));
+        if (!managed) {
+          noSuchSession(res);
+          return;
+        }
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-store",
@@ -220,15 +329,21 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
         });
         const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
         // Subscribe and snapshot in the same tick so no event is missed or duplicated.
-        const off = session.on((e) => send(e));
-        send({ type: "snapshot", ...session.snapshot() });
-        streams.add(res);
+        const off = managed.session.on((e) => send(e));
+        send({ type: "snapshot", ...managed.session.snapshot() });
+        const stream = { res, session: managed.id };
+        streams.add(stream);
         const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
         req.on("close", () => {
           clearInterval(keepAlive);
-          streams.delete(res);
+          streams.delete(stream);
           off();
         });
+        return;
+      }
+
+      if (url.pathname === "/sessions" || url.pathname.startsWith("/sessions/")) {
+        await handleSessions(req, res, url, manager);
         return;
       }
 
@@ -243,12 +358,20 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/workspace/")) {
-        await handleWorkspace(res, url, workspace);
+        const managed = target(url.searchParams.get("session"));
+        if (!managed) noSuchSession(res);
+        else await handleWorkspace(res, url, workspaceOf(managed));
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/command") {
         const cmd = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const managed = target(cmd.session);
+        if (!managed) {
+          noSuchSession(res);
+          return;
+        }
+        const session = managed.session;
         switch (cmd.type) {
           case "send":
             if (typeof cmd.text !== "string" || !cmd.text.trim()) throw new Error("text required");
@@ -295,6 +418,8 @@ export async function startPanelServer(session: Session, opts: PanelServerOption
     close: () =>
       new Promise<void>((resolve) => {
         offSecrets?.();
+        offChange();
+        offRemoved();
         server.closeAllConnections();
         server.close(() => resolve());
       }),

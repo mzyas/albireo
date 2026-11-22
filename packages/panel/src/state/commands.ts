@@ -1,7 +1,8 @@
 import { COMMANDS, type ParsedCommand, resolveModelArgs } from "../lib/commands.ts";
 import { retryTurn, switchModel } from "./actions.ts";
+import { sessions } from "./sessions.ts";
 import { chat, pushLocalError, pushLocalNotice } from "./store.ts";
-import { openPane, setKeysOpen, setSwitcherOpen } from "./ui.ts";
+import { openPane, setKeysOpen, setNewSessionOpen, setSwitcherOpen } from "./ui.ts";
 
 function helpText(): string {
   return [
@@ -21,6 +22,10 @@ export function runSlashCommand(cmd: ParsedCommand): void {
       else switchModel(request.provider, request.model);
       return;
     }
+    case "new":
+      if (sessions()?.canCreate === false) pushLocalNotice("This server runs a single session.");
+      else setNewSessionOpen(true);
+      return;
     case "retry":
       if (chat.canRetry) void retryTurn();
       else pushLocalNotice("There is nothing to retry: the last turn finished.");

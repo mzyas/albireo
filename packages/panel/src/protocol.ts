@@ -5,9 +5,12 @@ import type {
   ChangedFile,
   ChangeStatus,
   Changes,
+  CreateSessionBody,
   FileDiff,
   FileList,
   FilePreview,
+  SessionSummary,
+  SessionsResponse,
   WorkspaceFailure,
 } from "@albireo/server/protocol";
 import type { ProviderSecretView, SecretsStatus } from "@albireo/vault";
@@ -16,6 +19,7 @@ export type {
   ChangedFile,
   ChangeStatus,
   Changes,
+  CreateSessionBody,
   FileDiff,
   FileList,
   FilePreview,
@@ -23,16 +27,20 @@ export type {
   KernelEvent,
   ProviderSecretView,
   SecretsStatus,
+  SessionSummary,
+  SessionsResponse,
   WorkspaceFailure,
 };
 
 export type ApprovalRequest = Extract<KernelEvent, { type: "approval_request" }>;
 export type SnapshotEvent = { type: "snapshot" } & Snapshot;
-export type ServerEvent = SnapshotEvent | { type: "secrets_changed" } | LoggedEvent;
+/** `secrets_changed` and `sessions_changed` go to every open stream: re-fetch `/secrets` or `/sessions`. */
+export type ServerEvent = SnapshotEvent | { type: "secrets_changed" } | { type: "sessions_changed" } | LoggedEvent;
 
 /** `GET /secrets`: `enabled: false` when the server was started without a vault. */
 export type SecretsResponse = SecretsStatus | { enabled: false };
 
+/** What the page asks of the session it shows; the `session` field is added when it is sent. */
 export type Command =
   | { type: "send"; text: string }
   | { type: "approve"; id: string; allow: boolean }

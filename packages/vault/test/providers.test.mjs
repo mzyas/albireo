@@ -1105,3 +1105,66 @@ test("adding or deleting a custom provider is refused when another process creat
       manager.dispose();
     }
   }));
+
+test("every tracked session keeps its provider defined and is refreshed, a busy one when its turn ends", () =>
+  withDir(async (dir) => {
+    const other = { ...local, baseURL: "http://127.0.0.1:11435/v1" };
+    const stores = await openStores(dir, { providers: { one: local, two: other } });
+    const { config, registry } = stores;
+    const first = sessionOn(registry, "one", dir);
+    const second = sessionOn(registry, "two", dir);
+    const manager = new SecretManager(stores);
+    const untrackFirst = manager.track(first);
+    manager.track(second);
+
+    // The file drops both providers, but each is in use by a session, so both stay.
+    await writeFile(config.file, JSON.stringify({ providers: {} }));
+    await manager.reloadProviderConfig();
+    assert.deepEqual([...config.retained].sort(), ["one", "two"]);
+    assert.equal(registry.has("one") && registry.has("two"), true);
+    assert.match(manager.status().configError ?? "", /Active providers "one", "two" are no longer in providers\.json/);
+
+    // Once nothing uses one of them, it goes at the next reload.
+    untrackFirst();
+    await manager.reloadProviderConfig();
+    assert.deepEqual([...config.retained], ["two"]);
+    assert.match(manager.status().configError ?? "", /Active provider "two" is no longer in providers\.json; it stays/);
+    manager.dispose();
+  }));
+
+test("a change reaches every idle session at once and a running one after its turn", () =>
+  withDir(async (dir) => {
+    const stores = await openStores(dir, { providers: { one: local } });
+    const { registry } = stores;
+    const idle = sessionOn(registry, "one", dir);
+    const busy = sessionOn(registry, "one", dir);
+    const refreshed = new Map([
+      [idle, 0],
+      [busy, 0],
+    ]);
+    for (const s of [idle, busy]) {
+      const original = s.refreshProvider.bind(s);
+      s.refreshProvider = () => {
+        refreshed.set(s, (refreshed.get(s) ?? 0) + 1);
+        original();
+      };
+    }
+    // `busy` reports a turn in progress until we say otherwise.
+    let running = true;
+    Object.defineProperty(busy, "status", { get: () => (running ? "running" : "idle") });
+
+    const manager = new SecretManager(stores);
+    manager.track(idle);
+    manager.track(busy);
+
+    await manager.upsertProviderConfig({ id: "one", ...local, defaultModel: "q2" });
+    assert.equal(refreshed.get(idle), 1, "the idle session was refreshed at once");
+    assert.equal(refreshed.get(busy), 0, "the busy one was left alone");
+    assert.equal(manager.status().refreshPending, true);
+
+    running = false;
+    busy.emit({ type: "status", state: "idle" });
+    assert.equal(refreshed.get(busy), 1, "the busy one followed when its turn ended");
+    assert.equal(manager.status().refreshPending, false);
+    manager.dispose();
+  }));

@@ -124,6 +124,10 @@ export class Session {
   get status(): "idle" | "running" {
     return this.running ? "running" : "idle";
   }
+  /** How many tool calls wait for the user's answer right now. */
+  get pendingApprovals(): number {
+    return this.pendingEvents.size;
+  }
   /**
    * True when the history ends with a user message that the model has not answered: the last turn
    * failed, was aborted or refused. `retry()` then runs it again without adding a message.

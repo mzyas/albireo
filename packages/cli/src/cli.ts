@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { builtinTools, loadInstructions, type Risk, Session } from "@albireo/core";
-import { startPanelServer } from "@albireo/server";
-import { type LoadedSession, type Recording, SessionStore, StoreError, sameDir } from "@albireo/store";
+import { builtinTools, type Risk } from "@albireo/core";
+import { ManagerError, resumeChoice, SessionManager, startPanelServer } from "@albireo/server";
+import { type LoadedSession, SessionStore, StoreError, sameDir } from "@albireo/store";
 import {
   createVaultRegistry,
   ProviderConfigStore,
@@ -117,11 +117,18 @@ if (resumed) {
   }
 }
 
-// An explicit --provider wins; otherwise a resumed session goes back to the provider it used.
+// An explicit --provider and --model win; otherwise a resumed session goes back to the provider it used,
+// and to its model only if it had chosen one of its own (see resumeChoice).
 let providerId = values.provider ?? DEFAULT_PROVIDER;
-if (values.provider === undefined && resumed?.meta.provider) {
-  if (config.get(resumed.meta.provider)) providerId = resumed.meta.provider;
-  else note(`the saved session used provider "${resumed.meta.provider}", which is not available; using ${providerId}`);
+let modelId = values.model;
+if (resumed) {
+  const choice = resumeChoice(resumed.meta, registry, DEFAULT_PROVIDER, {
+    provider: values.provider,
+    model: values.model,
+  });
+  providerId = choice.provider;
+  modelId = choice.model;
+  if (choice.note) note(choice.note);
 }
 
 const def = config.get(providerId);
@@ -148,45 +155,40 @@ if (values.prompt !== undefined) {
   if (problem) fail(problem.message);
 }
 
-let session: Session;
-try {
-  // A model the session had chosen explicitly comes back; its provider's default is not pinned, so a
-  // later change to the model override still applies.
-  const resumedModel =
-    resumed && providerId === resumed.meta.provider && resumed.meta.model !== registry.get(providerId).defaultModel
-      ? resumed.meta.model
-      : undefined;
-  session = new Session({
-    providers: registry,
-    provider: providerId,
-    model: values.model ?? resumedModel,
-    tools: builtinTools,
-    cwd,
-    instructions: await loadInstructions(cwd),
-    autoApprove,
-    history: resumed?.messages,
-  });
-} catch (err) {
-  fail(err instanceof Error ? err.message : String(err));
-}
-
-// Every message is appended to the session's file as it happens. A failed write is reported once and
-// never interrupts the conversation.
-let recording: Recording | undefined;
-if (!values["no-save"]) {
-  let reported = false;
-  const onError = (err: Error) => {
-    if (reported) return;
-    reported = true;
+// The sessions of this run live in a manager: the first one is started or brought back here, and
+// the panel can start and open more. Every message is saved as it happens (unless --no-save); a failed
+// write is reported once and never interrupts the conversation.
+let reportedSaveError = false;
+const manager = new SessionManager({
+  registry,
+  tools: builtinTools,
+  autoApprove,
+  store,
+  save: !values["no-save"],
+  provider: providerId,
+  cwd,
+  onSaveError: (err) => {
+    if (reportedSaveError) return;
+    reportedSaveError = true;
     note(`could not save the conversation (${err.message}); it continues unsaved`);
-  };
-  recording = resumed ? store.resume(session, resumed.meta, { onError }) : store.record(session, { cwd, onError });
+  },
+});
+let managed: Awaited<ReturnType<SessionManager["create"]>>;
+try {
+  managed = resumed
+    ? await manager.open(resumed.meta.id, { cwd, provider: providerId, model: modelId })
+    : await manager.create({ cwd, provider: providerId, model: modelId });
+} catch (err) {
+  fail(err instanceof ManagerError ? err.message : err instanceof Error ? err.message : String(err));
 }
+const session = managed.session;
 
-const secrets = new SecretManager({ vault, registry, config, session });
+// Every session follows the vault: a key saved in the panel reaches all of them.
+const secrets = new SecretManager({ vault, registry, config });
+manager.each((s) => secrets.track(s));
 const panel = values["no-panel"]
   ? undefined
-  : await startPanelServer(session, { port: values.port ? Number(values.port) : 0, secrets });
+  : await startPanelServer(manager, { port: values.port ? Number(values.port) : 0, secrets });
 
 if (values.prompt !== undefined) {
   // Headless: stream to stdout, deny anything that needs approval.
@@ -198,18 +200,22 @@ if (values.prompt !== undefined) {
   });
   await session.send(values.prompt);
   process.stdout.write("\n");
-  await recording?.flush();
+  await manager.flush();
   await panel?.close();
   process.exit(0);
 }
 
-// Serve mode: the kernel keeps running; the GUI panel is the interface.
+// Serve mode: the kernel keeps running; the GUI panel is the interface. What sessions do is told on
+// stderr, each line with the folder it happened in once there is more than one.
 if (!panel) fail("internal error: panel server was not started");
-session.on((e) => {
-  if (e.type === "tool_call") process.stderr.write(`[tool] ${e.name}\n`);
-  else if (e.type === "approval_request")
-    process.stderr.write(`[approval needed] ${e.name} (${e.risk}) — answer it in the panel\n`);
-  else if (e.type === "error") process.stderr.write(`[error] ${e.message}\n`);
+manager.each((s) => {
+  const where = () => (manager.sessions().length > 1 ? ` [${path.basename(s.cwd)}]` : "");
+  return s.on((e) => {
+    if (e.type === "tool_call") process.stderr.write(`[tool]${where()} ${e.name}\n`);
+    else if (e.type === "approval_request")
+      process.stderr.write(`[approval needed]${where()} ${e.name} (${e.risk}) — answer it in the panel\n`);
+    else if (e.type === "error") process.stderr.write(`[error]${where()} ${e.message}\n`);
+  });
 });
 const vaultLine = (() => {
   if (vault.error) return `Vault: ${vault.error}`;
@@ -226,9 +232,9 @@ const vaultLine = (() => {
 })();
 const configLine = config.error ? `Providers: ${config.error}\n` : "";
 const sessionLine = (() => {
-  if (!recording) return "Session: not saved (--no-save)";
-  if (resumed) return `Session: ${recording.id} (continued, ${resumed.meta.messageCount} messages so far)`;
-  return `Session: ${recording.id} (saved from your first message)`;
+  if (values["no-save"]) return "Session: not saved (--no-save)";
+  if (resumed) return `Session: ${managed.id} (continued, ${resumed.meta.messageCount} messages so far)`;
+  return `Session: ${managed.id} (saved from your first message)`;
 })();
 process.stdout.write(
   `Albireo kernel running (${session.providerId} · ${session.model})\n${vaultLine}\n${configLine}${sessionLine}\nGUI panel: ${panel.url}\nPress Ctrl+C to stop.\n`,
@@ -237,6 +243,6 @@ await new Promise<void>((resolve) => {
   process.once("SIGINT", resolve);
   process.once("SIGTERM", resolve);
 });
-await recording?.flush();
+await manager.flush();
 await panel.close();
 process.exit(0);
